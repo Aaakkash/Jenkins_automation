@@ -1,0 +1,66 @@
+# Crypto-policy defaults used for Ansible 2.19 compatibility.
+rhel9cis_crypto_policy: DEFAULT
+rhel9cis_additional_crypto_subpolicies: []
+
+
+
+---
+cis_phase: '01'
+
+cis_run_id: ''
+cis_backup_root: /var/backups/rhel9-cis
+
+# Crypto-policy defaults used for Ansible 2.19 compatibility.
+rhel9cis_crypto_policy: DEFAULT
+rhel9cis_additional_crypto_subpolicies: []
+
+cis_backup_paths:
+
+
+- name: Build Ansible 2.19 compatible crypto-policy value
+  ansible.builtin.set_fact:
+    cis_collection_expected_crypto_policy: >-
+      {{ rhel9cis_crypto_policy }}{{ ':NO-SHA1' if rhel9cis_rule_1_6_3_enabled else '' }}{{ ':NO-WEAKMAC' if rhel9cis_rule_1_6_4_enabled else '' }}{{ ':NO-SSHCBC' if rhel9cis_rule_1_6_5_enabled else '' }}{{ ':NO-SSHCHACHA20' if rhel9cis_rule_1_6_6_enabled else '' }}{{ ':NO-SSHETM' if rhel9cis_rule_1_6_7_enabled else '' }}{% for cis_crypto_subpolicy in rhel9cis_additional_crypto_subpolicies | default([]) %}:{{ cis_crypto_subpolicy }}{% endfor %}
+  tags: [always]
+
+
+- name: Pre-remediation validation
+  ansible.builtin.include_role:
+    name: trippsc2.cis.rhel9
+    allow_duplicates: true
+    apply:
+      check_mode: true
+      tags: [cis_pre_validation]
+  vars:
+    _rhel9cis_expected_crypto_policy: >-
+      {{ cis_collection_expected_crypto_policy }}
+  tags: [cis_pre_validation]
+
+
+- name: Apply idempotent remediation for detected configuration drift
+  ansible.builtin.include_role:
+    name: trippsc2.cis.rhel9
+    allow_duplicates: true
+    apply:
+      tags: [cis_remediation]
+  vars:
+    _rhel9cis_expected_crypto_policy: >-
+      {{ cis_collection_expected_crypto_policy }}
+  tags: [cis_remediation]
+
+
+
+- name: Post-remediation validation
+  ansible.builtin.include_role:
+    name: trippsc2.cis.rhel9
+    allow_duplicates: true
+    apply:
+      check_mode: true
+      tags: [cis_post_validation]
+  vars:
+    _rhel9cis_expected_crypto_policy: >-
+      {{ cis_collection_expected_crypto_policy }}
+  tags: [cis_post_validation]
+
+
+
