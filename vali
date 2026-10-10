@@ -1,0 +1,1685 @@
+---
+# Strict exit-code contract: only 0 is compliant. Every executed non-zero
+# return code is classified NON_COMPLIANT. Missing site data prevents execution
+# and is reported CONFIG_VALUE_MISSING.
+cis_kernel_module_check: |
+  module="__MODULE__"
+  found="$(find /lib/modules -type f -name "${module}.ko*" -print -quit 2>/dev/null)"
+  if [ -z "$found" ]; then
+    echo "$module is not present in installed kernels"
+    exit 0
+  fi
+  loaded="$(lsmod | awk -v m="${module//-/_}" '$1 == m {print $1}')"
+  deny="$(modprobe -n -v "$module" 2>/dev/null)"
+  config="$(modprobe --showconfig 2>/dev/null)"
+  echo "module=$module loaded=${loaded:-no} deny=${deny:-missing}"
+  [ -z "$loaded" ] &&
+    grep -Pq "^\h*install\h+${module//-/_}\h+\/bin\/(true|false)\b" <<< "$config" &&
+    grep -Pq "^\h*blacklist\h+${module//-/_}\b" <<< "$config"
+
+cis_service_not_in_use_check: |
+  units="__UNITS__"
+  failed=0
+  for unit in $units; do
+    enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    echo "$unit enabled=${enabled:-not-found} active=${active:-not-found}"
+    [ "$enabled" = enabled ] && failed=1
+    [ "$active" = active ] && failed=1
+  done
+  exit "$failed"
+
+cis_package_absent_check: |
+  package="__PACKAGE__"
+  if rpm -q "$package" >/dev/null 2>&1; then
+    rpm -q "$package"
+    exit 1
+  fi
+  echo "$package is not installed"
+  exit 0
+
+cis_package_present_check: |
+  package="__PACKAGE__"
+  rpm -q "$package"
+
+# __SPEC__ is TARGET:OPTION.  Mount presence checks use the live mount table;
+# mount-option checks intentionally use /etc/fstab because that is the
+# supplied Tenable policy value and survives reboot.
+cis_mount_policy_check: |
+  spec="__SPEC__"
+  target="${spec%%:*}"
+  option="${spec#*:}"
+  if [ "$option" = mounted ]; then
+    actual="$(findmnt -n -o TARGET --target "$target" 2>/dev/null)"
+    echo "target=$target mounted_as=${actual:-missing}"
+    [ "$actual" = "$target" ]
+    exit
+  fi
+  options="$(awk -v target="$target" '$1 !~ /^#/ && $2 == target {value=$4} END {print value}' /etc/fstab 2>/dev/null)"
+  echo "target=$target fstab_options=${options:-missing} required=$option"
+  [ -n "$options" ] && tr ',' '\n' <<< "$options" | grep -Fxq "$option"
+
+# __SPEC__ contains whitespace-separated key=value pairs.  Both the running
+# value and the effective persistent systemd-sysctl configuration must match.
+cis_sysctl_policy_check: |
+  spec="__SPEC__"
+  persistent_config="$(/usr/lib/systemd/systemd-sysctl --cat-config 2>/dev/null)" || exit 2
+  failed=0
+  for pair in $spec; do
+    key="${pair%%=*}"
+    expected="${pair#*=}"
+    if [[ "$key" == net.ipv6.* ]] && [ "$(cat /sys/module/ipv6/parameters/disable 2>/dev/null || echo 1)" != 0 ]; then
+      echo "$key not applicable because IPv6 is disabled"
+      continue
+    fi
+    runtime="$(sysctl -n "$key" 2>/dev/null)" || exit 2
+    persistent="$(awk -F= -v key="$key" '
+      {
+        left=$1; gsub(/[[:space:]]/, "", left)
+        if (left == key) {
+          right=$2; sub(/[[:space:]]*[#;].*$/, "", right)
+          gsub(/[[:space:]]/, "", right); value=right
+        }
+      }
+      END {print value}' <<< "$persistent_config")"
+    echo "$key runtime=${runtime:-missing} persistent=${persistent:-missing} expected=$expected"
+    [ "$runtime" = "$expected" ] && [ "$persistent" = "$expected" ] || failed=1
+  done
+  exit "$failed"
+
+# Resolve sshd Match rules for root, the local host/address, and every
+# configured listening port, as required by the supplied audit policy.
+cis_sshd_effective_check: |
+  spec="__SPEC__"
+  keyword="${spec%%:*}"
+  forbidden="${spec#*:}"
+  host="$(hostname)"
+  addr="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}')"
+  addr="${addr:-127.0.0.1}"
+  ports="$(awk 'tolower($1)=="port" {print $2} tolower($1)=="localport" {print $2}' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | sort -u)"
+  ports="${ports:-22}"
+  failed=0
+  for port in $ports; do
+    value="$(sshd -T -C user=root -C host="$host" -C addr="$addr" -C lport="$port" 2>/dev/null | awk -v key="$keyword" 'tolower($1)==key {$1=""; sub(/^ /,""); print}')" || exit 2
+    echo "port=$port $keyword=${value:-missing}"
+    [ -n "$value" ] || { failed=1; continue; }
+    grep -Pqi "$forbidden" <<< "$value" && failed=1
+  done
+  exit "$failed"
+
+cis_remediation_allowlist:
+  - '1.1.1.1'
+  - '1.1.1.2'
+  - '1.1.1.3'
+  - '1.1.1.4'
+  - '1.1.1.5'
+  - '1.1.1.8'
+  - '1.3.1.1'
+  - '1.3.1.7'
+  - '1.3.1.8'
+  - '1.4.2'
+  - '1.5.1'
+  - '1.5.2'
+  - '1.5.3'
+  - '1.5.4'
+  - '1.6.1'
+  - '1.6.2'
+  - '1.6.3'
+  - '1.6.4'
+  - '1.6.5'
+  - '1.6.6'
+  - '1.6.7'
+  - '1.7.4'
+  - '1.7.5'
+  - '1.7.6'
+  - '3.1.1'
+  - '1.1.2.1.1'
+  - '1.1.2.1.2'
+  - '1.1.2.1.3'
+  - '1.1.2.1.4'
+  - '1.1.2.2.1'
+  - '1.1.2.2.2'
+  - '1.1.2.2.3'
+  - '1.1.2.2.4'
+  - '1.1.2.3.2'
+  - '1.1.2.3.3'
+  - '1.1.2.4.2'
+  - '1.1.2.4.3'
+  - '1.1.2.5.2'
+  - '1.1.2.5.3'
+  - '1.1.2.5.4'
+  - '1.1.2.6.2'
+  - '1.1.2.6.3'
+  - '1.1.2.6.4'
+  - '1.1.2.7.2'
+  - '1.1.2.7.3'
+  - '1.1.2.7.4'
+  - '3.1.2'
+  - '3.1.3'
+  - '3.3.1'
+  - '3.3.2'
+  - '3.3.3'
+  - '3.3.4'
+  - '3.3.5'
+  - '3.3.6'
+  - '3.3.7'
+  - '3.3.8'
+  - '3.3.9'
+  - '3.3.10'
+  - '3.3.11'
+  - '4.1.1'
+  - '5.1.1'
+  - '5.1.2'
+  - '5.1.3'
+  - '5.1.12'
+  - '5.1.13'
+  - '5.1.14'
+  - '5.1.15'
+  - '5.1.16'
+  - '5.1.17'
+  - '5.1.18'
+  - '5.1.19'
+  - '5.1.20'
+  - '5.1.21'
+  - '5.1.22'
+  - '5.2.1'
+  - '5.2.2'
+  - '5.2.5'
+  - '6.1.1'
+  - '6.1.2'
+  - '6.2.2.1.4'
+  - '6.2.3.1'
+  - '6.2.3.2'
+  - '6.2.3.3'
+  - '6.2.3.4'
+  - '6.2.3.7'
+  - '7.1.1'
+  - '7.1.2'
+  - '7.1.3'
+  - '7.1.4'
+  - '7.1.5'
+  - '7.1.6'
+  - '7.1.7'
+  - '7.1.8'
+  - '7.1.9'
+  - '7.1.10'
+  - '2.4.1.1'
+  - '2.4.1.2'
+  - '2.4.1.3'
+  - '2.4.1.4'
+  - '2.4.1.5'
+  - '2.4.1.6'
+  - '2.4.1.7'
+  - '2.4.1.8'
+  - '2.4.2.1'
+
+cis_validators:
+  '1.2.1.2':
+    type: automatic
+    command: |
+      main_value="$(awk -F= '
+        /^[[:space:]]*\[main\][[:space:]]*$/ {in_main=1; next}
+        /^[[:space:]]*\[/ {in_main=0}
+        in_main && $1 ~ /^[[:space:]]*gpgcheck[[:space:]]*$/ {
+          value=$2; gsub(/[[:space:]]/, "", value); result=tolower(value)
+        }
+        END {print result}' /etc/dnf/dnf.conf 2>/dev/null)"
+      bad="$(grep -RPinE '^[[:space:]]*gpgcheck[[:space:]]*=[[:space:]]*(0|false|no)\b' /etc/yum.repos.d 2>/dev/null || true)"
+      echo "global_gpgcheck=${main_value:-unset}"
+      echo "${bad:-No repository disables gpgcheck}"
+      { [ "$main_value" = 1 ] || [ "$main_value" = true ] || [ "$main_value" = yes ]; } && [ -z "$bad" ]
+  '1.7.1':
+    type: automatic
+    requires: [cis_motd_banner_text]
+    command: |
+      bad="$(grep -RPinE '(\\m|\\r|\\s|\\v|\b(\\S*r|\\S*v)\b)' /etc/motd /etc/motd.d 2>/dev/null || true)"
+      echo "${bad:-No operating-system escape sequences found in motd}"
+      [ -z "$bad" ] || exit 1
+      [ -n "$CIS_MOTD_BANNER_TEXT" ] || { echo 'Approved motd text is not configured'; exit 1; }
+      actual="$(cat /etc/motd 2>/dev/null)"
+      [ "$actual" = "$CIS_MOTD_BANNER_TEXT" ]
+  '1.7.2':
+    type: automatic
+    requires: [cis_local_login_banner_text]
+    command: |
+      bad="$(grep -PinE '(\\v|\\r|\\m|\\s|\b(\\S*r|\\S*v)\b)' /etc/issue 2>/dev/null || true)"
+      echo "${bad:-No operating-system escape sequences found in /etc/issue}"
+      [ -z "$bad" ] || exit 1
+      [ -n "$CIS_LOCAL_LOGIN_BANNER_TEXT" ] || { echo 'Approved local banner is not configured'; exit 1; }
+      actual="$(cat /etc/issue 2>/dev/null)"
+      [ "$actual" = "$CIS_LOCAL_LOGIN_BANNER_TEXT" ]
+  '1.7.3':
+    type: automatic
+    requires: [cis_remote_login_banner_text]
+    command: |
+      bad="$(grep -PinE '(\\v|\\r|\\m|\\s|\b(\\S*r|\\S*v)\b)' /etc/issue.net 2>/dev/null || true)"
+      echo "${bad:-No operating-system escape sequences found in /etc/issue.net}"
+      [ -z "$bad" ] || exit 1
+      [ -n "$CIS_REMOTE_LOGIN_BANNER_TEXT" ] || { echo 'Approved remote banner is not configured'; exit 1; }
+      actual="$(cat /etc/issue.net 2>/dev/null)"
+      [ "$actual" = "$CIS_REMOTE_LOGIN_BANNER_TEXT" ]
+  '1.8.2':
+    type: automatic
+    requires: [cis_gdm_scope]
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      [ "$CIS_GDM_SCOPE" = workstation_with_gdm ] || { echo 'GDM is installed but workstation scope is not approved'; exit 1; }
+      enabled="$(grep -RPh '^[[:space:]]*banner-message-enable[[:space:]]*=[[:space:]]*\Ktrue\b' /etc/dconf/db 2>/dev/null | tail -1)"
+      text="$(grep -RPh '^[[:space:]]*banner-message-text[[:space:]]*=[[:space:]]*\K.*' /etc/dconf/db 2>/dev/null | tail -1 | sed "s/^['\"]//;s/['\"]$//")"
+      echo "banner_enabled=${enabled:-unset}"
+      [ "$enabled" = true ] && [ -n "$CIS_GDM_LOGIN_BANNER_TEXT" ] && [ "$text" = "$CIS_GDM_LOGIN_BANNER_TEXT" ]
+  '1.8.3':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      value="$(grep -RPh '^[[:space:]]*disable-user-list[[:space:]]*=[[:space:]]*\Ktrue\b' /etc/dconf/db 2>/dev/null | tail -1)"
+      echo "disable-user-list=${value:-unset}"; [ "$value" = true ]
+  '1.8.4':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      idle="$(grep -RPh '^[[:space:]]*idle-delay[[:space:]]*=[[:space:]]*uint32[[:space:]]+\K[0-9]+' /etc/dconf/db 2>/dev/null | tail -1)"
+      lock="$(grep -RPh '^[[:space:]]*lock-delay[[:space:]]*=[[:space:]]*uint32[[:space:]]+\K[0-9]+' /etc/dconf/db 2>/dev/null | tail -1)"
+      echo "idle-delay=${idle:-unset} lock-delay=${lock:-unset}"
+      [[ "$idle" =~ ^[0-9]+$ ]] && [ "$idle" -gt 0 ] && [ "$idle" -le 900 ] && [[ "$lock" =~ ^[0-9]+$ ]] && [ "$lock" -le 5 ]
+  '1.8.5':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      grep -RPsq '^[[:space:]]*/org/gnome/desktop/session/idle-delay[[:space:]]*$' /etc/dconf/db/*/locks 2>/dev/null &&
+        grep -RPsq '^[[:space:]]*/org/gnome/desktop/screensaver/lock-delay[[:space:]]*$' /etc/dconf/db/*/locks 2>/dev/null
+  '1.8.6':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      auto="$(grep -RPh '^[[:space:]]*automount[[:space:]]*=[[:space:]]*\Kfalse\b' /etc/dconf/db 2>/dev/null | tail -1)"
+      open="$(grep -RPh '^[[:space:]]*automount-open[[:space:]]*=[[:space:]]*\Kfalse\b' /etc/dconf/db 2>/dev/null | tail -1)"
+      echo "automount=${auto:-unset} automount-open=${open:-unset}"; [ "$auto" = false ] && [ "$open" = false ]
+  '1.8.7':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      grep -RPsq '^[[:space:]]*/org/gnome/desktop/media-handling/automount[[:space:]]*$' /etc/dconf/db/*/locks 2>/dev/null &&
+        grep -RPsq '^[[:space:]]*/org/gnome/desktop/media-handling/automount-open[[:space:]]*$' /etc/dconf/db/*/locks 2>/dev/null
+  '1.8.8':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      value="$(grep -RPh '^[[:space:]]*autorun-never[[:space:]]*=[[:space:]]*\Ktrue\b' /etc/dconf/db 2>/dev/null | tail -1)"
+      echo "autorun-never=${value:-unset}"; [ "$value" = true ]
+  '1.8.9':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      grep -RPsq '^[[:space:]]*/org/gnome/desktop/media-handling/autorun-never[[:space:]]*$' /etc/dconf/db/*/locks 2>/dev/null
+  '1.8.10':
+    type: automatic
+    command: |
+      if ! rpm -q gdm >/dev/null 2>&1; then echo 'GDM is absent; server condition satisfied'; exit 0; fi
+      bad="$(grep -RPinE '^[[:space:]]*Enable[[:space:]]*=[[:space:]]*true\b' /etc/gdm/custom.conf /etc/gdm3/custom.conf 2>/dev/null || true)"
+      echo "${bad:-XDMCP is not enabled}"; [ -z "$bad" ]
+  '1.1.1.1':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'cramfs') }}"
+  '1.1.1.2':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'freevxfs') }}"
+  '1.1.1.3':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'hfs') }}"
+  '1.1.1.4':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'hfsplus') }}"
+  '1.1.1.5':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'jffs2') }}"
+  '1.1.1.8':
+    type: automatic
+    command: "{{ cis_kernel_module_check | replace('__MODULE__', 'usb-storage') }}"
+  '1.1.1.9':
+    type: automatic
+    requires: [cis_unused_filesystem_modules]
+    command: |
+      [ -n "$CIS_UNUSED_FILESYSTEM_MODULES" ] || { echo 'No approved unused-filesystem module list configured'; exit 1; }
+      failed=0
+      for module in $CIS_UNUSED_FILESYSTEM_MODULES; do
+        case " $CIS_REQUIRED_FILESYSTEMS " in *" $module "*) echo "$module is approved as required"; continue;; esac
+        found="$(find /lib/modules -type f -name "${module}.ko*" -print -quit 2>/dev/null)"
+        [ -z "$found" ] && { echo "$module is absent"; continue; }
+        loaded="$(lsmod | awk -v m="${module//-/_}" '$1 == m {print $1}')"
+        config="$(modprobe --showconfig 2>/dev/null)"
+        echo "module=$module loaded=${loaded:-no}"
+        [ -z "$loaded" ] || failed=1
+        grep -Pq "^\h*install\h+${module//-/_}\h+/bin/(true|false)\b" <<< "$config" || failed=1
+        grep -Pq "^\h*blacklist\h+${module//-/_}\b" <<< "$config" || failed=1
+      done
+      exit "$failed"
+  '1.1.2.1.1':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:mounted') }}"
+  '1.1.2.1.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:nodev') }}"
+  '1.1.2.1.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:nosuid') }}"
+  '1.1.2.1.4':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:noexec') }}"
+  '1.1.2.2.1':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/dev/shm:mounted') }}"
+  '1.1.2.2.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/dev/shm:nodev') }}"
+  '1.1.2.2.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/dev/shm:nosuid') }}"
+  '1.1.2.2.4':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/dev/shm:noexec') }}"
+  '1.1.2.3.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/home:nodev') }}"
+  '1.1.2.3.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/home:nosuid') }}"
+  '1.1.2.4.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var:nodev') }}"
+  '1.1.2.4.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var:nosuid') }}"
+  '1.1.2.5.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/tmp:nodev') }}"
+  '1.1.2.5.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/tmp:nosuid') }}"
+  '1.1.2.5.4':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/tmp:noexec') }}"
+  '1.1.2.6.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log:nodev') }}"
+  '1.1.2.6.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log:nosuid') }}"
+  '1.1.2.6.4':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log:noexec') }}"
+  '1.1.2.7.2':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log/audit:nodev') }}"
+  '1.1.2.7.3':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log/audit:nosuid') }}"
+  '1.1.2.7.4':
+    type: automatic
+    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/var/log/audit:noexec') }}"
+
+  '1.4.1':
+    type: automatic
+    requires: [rhel9cis_bootloader_password]
+    command: |
+      if grep -Pq '^GRUB2_PASSWORD=grub\.pbkdf2\.' /boot/grub2/user.cfg 2>/dev/null; then
+        echo 'GRUB2 PBKDF2 password hash is configured'
+        exit 0
+      fi
+      echo 'GRUB2 PBKDF2 password hash is missing'
+      exit 1
+  '1.2.1.1':
+    type: automatic
+    command: |
+      count="$(rpm -q gpg-pubkey --queryformat '%{name}-%{version}-%{release}\n' 2>/dev/null | tee /dev/stderr | wc -l)"
+      [ "$count" -gt 0 ]
+  '1.2.1.4':
+    type: automatic
+    command: |
+      repos="$(dnf -q repolist --enabled 2>/dev/null | awk 'NR > 1 && NF {print}')" || exit 2
+      printf '%s\n' "$repos"
+      [ -n "$repos" ]
+  '1.2.2.1':
+    type: automatic
+    command: |
+      output="$(dnf -q check-update 2>&1)"
+      rc=$?
+      printf '%s\n' "$output"
+      [ "$rc" -eq 0 ] && exit 0
+      [ "$rc" -eq 100 ] && exit 1
+      exit 2
+  '1.3.1.1':
+    type: automatic
+    command: "{{ cis_package_present_check | replace('__PACKAGE__', 'libselinux') }}"
+  '1.3.1.2':
+    type: automatic
+    command: |
+      bad="$(grubby --info=ALL 2>/dev/null | grep -Po '(selinux|enforcing)=0' || true)"
+      echo "${bad:-No SELinux-disabling boot arguments}"
+      [ -z "$bad" ]
+  '1.3.1.3':
+    type: automatic
+    command: |
+      policy="$(sestatus 2>/dev/null | awk -F: '/Loaded policy name/ {gsub(/^[ \t]+/,"",$2); print $2}')"
+      echo "loaded_policy=${policy:-unknown}"
+      [ "$policy" = targeted ] || [ "$policy" = mls ]
+  '1.3.1.4':
+    type: automatic
+    command: |
+      mode="$(getenforce 2>/dev/null)" || exit 2
+      echo "SELinux mode=$mode"
+      [ "$mode" != Disabled ]
+  '1.3.1.7':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'mcstrans') }}"
+  '1.3.1.8':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'setroubleshoot') }}"
+  '1.4.2':
+    type: automatic
+    command: |
+      failed=0
+      count=0
+      while IFS= read -r file; do
+        count=$((count + 1))
+        mode="$(stat -Lc '%a' "$file" 2>/dev/null)" || exit 2
+        owner="$(stat -Lc '%u:%g' "$file")"
+        echo "$file mode=$mode owner=$owner"
+        [ "$owner" = 0:0 ] || failed=1
+        if [[ "$file" == /boot/efi/EFI/* ]]; then
+          [ "$((8#$mode & 8#077))" -eq 0 ] || failed=1
+        else
+          [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
+        fi
+      done < <(find /boot/grub2 /boot/efi/EFI -xdev -type f \
+        \( -name 'grub.cfg' -o -name 'grubenv' -o -name 'user.cfg' \) 2>/dev/null)
+      [ "$count" -gt 0 ] || { echo 'No bootloader configuration files found'; exit 2; }
+      exit "$failed"
+  '1.5.1':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'kernel.randomize_va_space=2') }}"
+  '1.5.2':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'kernel.yama.ptrace_scope=1') }}"
+  '1.5.3':
+    type: automatic
+    command: |
+      value="$(systemd-analyze cat-config systemd/coredump.conf systemd/coredump.conf.d/* 2>/dev/null | awk -F= '/^[[:space:]]*ProcessSizeMax=/ {gsub(/[[:space:]]/,"",$2); v=$2} END {print v}')"
+      echo "ProcessSizeMax=${value:-unset}"
+      [ "$value" = 0 ]
+  '1.5.4':
+    type: automatic
+    command: |
+      value="$(systemd-analyze cat-config systemd/coredump.conf systemd/coredump.conf.d/* 2>/dev/null | awk -F= '/^[[:space:]]*Storage=/ {gsub(/[[:space:]]/,"",$2); v=tolower($2)} END {print v}')"
+      echo "Storage=${value:-unset}"
+      [ "$value" = none ]
+  '1.6.1':
+    type: automatic
+    command: |
+      policy="$(update-crypto-policies --show 2>/dev/null)" || exit 2
+      echo "policy=$policy"
+      ! grep -Pqi '(^|:)LEGACY($|:)' <<< "$policy"
+  '1.6.2':
+    type: automatic
+    command: |
+      matches="$(grep -RPin '^[[:space:]]*CRYPTO_POLICY[[:space:]]*=' /etc/sysconfig/sshd /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null || true)"
+      echo "${matches:-No SSH crypto-policy override found}"
+      [ -z "$matches" ]
+  '1.6.3':
+    type: automatic
+    command: |
+      file=/etc/crypto-policies/state/CURRENT.pol
+      grep -Pqi '^\h*hash\h*=\h*.*-SHA1\b' "$file" &&
+        grep -Pqi '^\h*sign\h*=\h*.*-\*-SHA1\b' "$file" &&
+        grep -Pqi '^\h*sha1_in_certs\h*=\h*0\b' "$file"
+  '1.6.4':
+    type: automatic
+    command: |
+      file=/etc/crypto-policies/state/CURRENT.pol
+      [ -r "$file" ] || exit 2
+      bad="$(grep -Pi '^\h*mac\h*=\h*([^#\r ]+)?-64\b' "$file" || true)"
+      echo "${bad:-No MAC shorter than 128 bits is enabled}"
+      [ -z "$bad" ]
+  '1.6.5':
+    type: automatic
+    command: |
+      file=/etc/crypto-policies/state/CURRENT.pol
+      [ -r "$file" ] || exit 2
+      if ! grep -Pqi '^\h*cipher\h*=\h*([^#\r ]+)?-CBC\b' "$file"; then
+        echo 'CBC is disabled globally'
+        exit 0
+      fi
+      ssh_lines="$(grep -Pi '^\h*cipher@(lib|open)ssh(-server|-client)?\h*=' "$file" || true)"
+      echo "${ssh_lines:-No SSH-specific cipher override}"
+      [ -n "$ssh_lines" ] && ! grep -Pqi -- '-CBC\b' <<< "$ssh_lines"
+  '1.6.6':
+    type: automatic
+    command: |
+      file=/etc/crypto-policies/state/CURRENT.pol
+      [ -r "$file" ] || exit 2
+      if ! grep -Pqi '^\h*cipher\h*=\h*([^#\r ]+)?\bchacha20-poly1305\b' "$file"; then
+        echo 'chacha20-poly1305 is disabled globally'
+        exit 0
+      fi
+      ssh_lines="$(grep -Pi '^\h*cipher@(lib|open)ssh(-server|-client)?\h*=' "$file" || true)"
+      echo "${ssh_lines:-No SSH-specific cipher override}"
+      [ -n "$ssh_lines" ] && ! grep -Pqi '\bchacha20-poly1305\b' <<< "$ssh_lines"
+  '1.6.7':
+    type: automatic
+    command: |
+      grep -Pqi '^\h*etm(@SSH)?\h*=\h*DISABLE_ETM\b' /etc/crypto-policies/state/CURRENT.pol
+  '1.7.4':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/motd
+      mode="$(stat -Lc '%a' /etc/motd)" owner="$(stat -Lc '%U:%G' /etc/motd)"
+      [ "$owner" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '1.7.5':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/issue
+      mode="$(stat -Lc '%a' /etc/issue)" owner="$(stat -Lc '%U:%G' /etc/issue)"
+      [ "$owner" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '1.7.6':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/issue.net
+      mode="$(stat -Lc '%a' /etc/issue.net)" owner="$(stat -Lc '%U:%G' /etc/issue.net)"
+      [ "$owner" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+
+  '2.1.1':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'autofs.service') }}"
+  '2.1.2':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'avahi-daemon.service avahi-daemon.socket') }}"
+  '2.1.3':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'dhcpd.service dhcpd6.service') }}"
+  '2.1.4':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'named.service') }}"
+  '2.1.5':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'dnsmasq.service') }}"
+  '2.1.7':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'vsftpd.service proftpd.service') }}"
+  '2.1.8':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'dovecot.service cyrus-imapd.service') }}"
+  '2.1.9':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'nfs-server.service') }}"
+  '2.1.10':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'ypserv.service') }}"
+  '2.1.11':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'cups.service cups.socket') }}"
+  '2.1.13':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'rsyncd.service rsyncd.socket') }}"
+  '2.1.14':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'snmpd.service') }}"
+  '2.1.15':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'telnet.socket') }}"
+  '2.1.16':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'tftp.socket tftp.service') }}"
+  '2.1.17':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'squid.service') }}"
+  '2.1.18':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'httpd.service nginx.service') }}"
+  '2.1.19':
+    type: automatic
+    command: "{{ cis_service_not_in_use_check | replace('__UNITS__', 'xinetd.service') }}"
+  '2.1.21':
+    type: automatic
+    command: |
+      bad="$(ss -lnt 2>/dev/null | awk 'NR>1 {split($4,a,":"); p=a[length(a)]; if (p ~ /^(25|465|587)$/ && $4 !~ /^(127\.0\.0\.1|\[::1\]):/) print $4}')"
+      echo "${bad:-No non-loopback MTA listener}"
+      [ -z "$bad" ]
+  '2.1.22':
+    type: automatic
+    requires: [cis_approved_listening_services]
+    command: |
+      [ -n "$CIS_APPROVED_LISTENING_SERVICES" ] || { echo 'Approved listener list is empty'; exit 1; }
+      actual="$(ss -H -lntu 2>/dev/null | awk '{p=$1; a=$5; sub(/^.*:/,"",a); gsub(/\]$/,"",a); if (p=="tcp" || p=="udp") print p ":" a}' | sort -u)"
+      approved="$(tr ' ' '\n' <<< "$CIS_APPROVED_LISTENING_SERVICES" | sed '/^$/d' | sort -u)"
+      unapproved="$(comm -23 <(printf '%s\n' "$actual") <(printf '%s\n' "$approved"))"
+      printf 'listeners:\n%s\nunapproved:\n%s\n' "$actual" "${unapproved:-none}"
+      [ -z "$unapproved" ]
+  '2.2.1':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'ftp') }}"
+  '2.2.3':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'ypbind') }}"
+  '2.2.4':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'telnet') }}"
+  '2.2.5':
+    type: automatic
+    command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'tftp') }}"
+  '2.3.1':
+    type: automatic
+    command: |
+      rpm -q chrony || exit 1
+      enabled="$(systemctl is-enabled chronyd.service 2>/dev/null || true)"
+      active="$(systemctl is-active chronyd.service 2>/dev/null || true)"
+      echo "chronyd enabled=$enabled active=$active"
+      [ "$enabled" = enabled ] && [ "$active" = active ]
+  '2.3.2':
+    type: automatic
+    requires: [cis_chrony_sources]
+    command: |
+      [ -n "$CIS_CHRONY_SOURCES" ] || { echo 'Approved chrony source list is empty'; exit 1; }
+      config="$(grep -RhsE '^[[:space:]]*(server|pool)[[:space:]]+' /etc/chrony.conf /etc/chrony.d 2>/dev/null || true)"
+      printf '%s\n' "$config"
+      failed=0
+      for source in $CIS_CHRONY_SOURCES; do
+        grep -Eq "^[[:space:]]*(server|pool)[[:space:]]+${source//./\\.}([[:space:]]|$)" <<< "$config" || { echo "Missing approved source: $source"; failed=1; }
+      done
+      [ "$failed" -eq 0 ]
+  '2.3.3':
+    type: automatic
+    command: |
+      line="$(grep -E '^[[:space:]]*OPTIONS=' /etc/sysconfig/chronyd 2>/dev/null || true)"
+      echo "${line:-OPTIONS is not explicitly configured}"
+      ! grep -Pq -- '(^|[[:space:]])-u[[:space:]]+root([[:space:]]|$)' <<< "$line"
+  '2.4.1.1':
+    type: automatic
+    command: |
+      enabled="$(systemctl is-enabled crond.service 2>/dev/null || true)"
+      active="$(systemctl is-active crond.service 2>/dev/null || true)"
+      echo "crond enabled=$enabled active=$active"
+      [ "$enabled" = enabled ] && [ "$active" = active ]
+  '2.4.1.2':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/crontab
+      mode="$(stat -Lc '%a' /etc/crontab)"
+      [ "$(stat -Lc '%U:%G' /etc/crontab)" = root:root ] && [ "$((8#$mode & 8#177))" -eq 0 ]
+  '2.4.1.3':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.hourly
+      mode="$(stat -Lc '%a' /etc/cron.hourly)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.hourly)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
+  '2.4.1.4':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.daily
+      mode="$(stat -Lc '%a' /etc/cron.daily)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.daily)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
+  '2.4.1.5':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.weekly
+      mode="$(stat -Lc '%a' /etc/cron.weekly)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.weekly)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
+  '2.4.1.6':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.monthly
+      mode="$(stat -Lc '%a' /etc/cron.monthly)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.monthly)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
+  '2.4.1.7':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.d
+      mode="$(stat -Lc '%a' /etc/cron.d)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.d)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
+  '2.4.1.8':
+    type: automatic
+    command: |
+      test ! -e /etc/cron.deny || { echo '/etc/cron.deny exists'; exit 1; }
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.allow || exit 1
+      mode="$(stat -Lc '%a' /etc/cron.allow)"
+      [ "$(stat -Lc '%U:%G' /etc/cron.allow)" = root:root ] && [ "$((8#$mode & 8#137))" -eq 0 ]
+  '2.4.2.1':
+    type: automatic
+    command: |
+      test ! -e /etc/at.deny || { echo '/etc/at.deny exists'; exit 1; }
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/at.allow || exit 1
+      mode="$(stat -Lc '%a' /etc/at.allow)"
+      [ "$(stat -Lc '%U:%G' /etc/at.allow)" = root:root ] && [ "$((8#$mode & 8#137))" -eq 0 ]
+
+  '3.1.1':
+    type: automatic
+    requires: [cis_ipv6_policy]
+    command: |
+      module_disabled="$(cat /sys/module/ipv6/parameters/disable 2>/dev/null)" || exit 2
+      echo "IPv6 module disable=$module_disabled policy=$CIS_IPV6_POLICY"
+      case "$CIS_IPV6_POLICY" in
+        review) exit 1 ;;
+        enabled)
+          [ "$module_disabled" = 0 ] || exit 1
+          all_value="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || exit 2
+          default_value="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || exit 2
+          echo "runtime all.disable_ipv6=$all_value default.disable_ipv6=$default_value"
+          [ "$all_value" = 0 ] && [ "$default_value" = 0 ]
+          ;;
+        disabled)
+          if [ "$module_disabled" != 0 ]; then
+            echo 'IPv6 is disabled by the kernel module parameter'
+            exit 0
+          fi
+          all_value="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || exit 2
+          default_value="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || exit 2
+          persistent_config="$(/usr/lib/systemd/systemd-sysctl --cat-config 2>/dev/null)" || exit 2
+          persistent_all="$(awk -F= '
+            {key=$1; gsub(/[[:space:]]/, "", key)}
+            key == "net.ipv6.conf.all.disable_ipv6" {
+              value=$2; sub(/[[:space:]]*[#;].*$/, "", value); gsub(/[[:space:]]/, "", value); result=value
+            }
+            END {print result}' <<< "$persistent_config")"
+          persistent_default="$(awk -F= '
+            {key=$1; gsub(/[[:space:]]/, "", key)}
+            key == "net.ipv6.conf.default.disable_ipv6" {
+              value=$2; sub(/[[:space:]]*[#;].*$/, "", value); gsub(/[[:space:]]/, "", value); result=value
+            }
+            END {print result}' <<< "$persistent_config")"
+          echo "runtime all=$all_value default=$default_value persistent all=${persistent_all:-missing} default=${persistent_default:-missing}"
+          [ "$all_value" = 1 ] && [ "$default_value" = 1 ] &&
+            [ "$persistent_all" = 1 ] && [ "$persistent_default" = 1 ]
+          ;;
+        *) exit 2 ;;
+      esac
+  '3.1.2':
+    type: automatic
+    command: |
+      shopt -s nullglob
+      if ! compgen -G '/sys/class/net/*/wireless' >/dev/null; then
+        echo "No wireless interface detected"
+        exit 0
+      fi
+      wireless=(/sys/class/net/*/wireless)
+      failed=0
+      for path in "${wireless[@]}"; do
+        iface="$(basename "$(dirname "$path")")"
+        state="$(cat "/sys/class/net/$iface/operstate" 2>/dev/null)"
+        echo "$iface state=${state:-unknown}"
+        [ "$state" = up ] && failed=1
+      done
+      exit "$failed"
+  '3.1.3':
+    type: automatic
+    command: |
+      if ! rpm -q bluez >/dev/null 2>&1 && ! test -d /sys/class/bluetooth; then
+        echo "Bluetooth package and hardware are absent"
+        exit 0
+      fi
+      enabled="$(systemctl is-enabled bluetooth.service 2>/dev/null || true)"
+      active="$(systemctl is-active bluetooth.service 2>/dev/null || true)"
+      loaded="$(lsmod | awk '$1 == "bluetooth" {print $1}')"
+      echo "enabled=${enabled:-not-found} active=${active:-not-found} module=${loaded:-not-loaded}"
+      [ "$enabled" != enabled ] && [ "$active" != active ] && [ -z "$loaded" ]
+  '3.3.1':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.ip_forward=0 net.ipv6.conf.all.forwarding=0') }}"
+  '3.3.2':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.default.send_redirects=0') }}"
+  '3.3.3':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.icmp_ignore_bogus_error_responses=1') }}"
+  '3.3.4':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.icmp_echo_ignore_broadcasts=1') }}"
+  '3.3.5':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.accept_redirects=0 net.ipv4.conf.default.accept_redirects=0 net.ipv6.conf.all.accept_redirects=0 net.ipv6.conf.default.accept_redirects=0') }}"
+  '3.3.6':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.secure_redirects=0 net.ipv4.conf.default.secure_redirects=0') }}"
+  '3.3.7':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.default.rp_filter=1') }}"
+  '3.3.8':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.accept_source_route=0 net.ipv4.conf.default.accept_source_route=0 net.ipv6.conf.all.accept_source_route=0 net.ipv6.conf.default.accept_source_route=0') }}"
+  '3.3.9':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.conf.all.log_martians=1 net.ipv4.conf.default.log_martians=1') }}"
+  '3.3.10':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv4.tcp_syncookies=1') }}"
+  '3.3.11':
+    type: automatic
+    command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'net.ipv6.conf.all.accept_ra=0 net.ipv6.conf.default.accept_ra=0') }}"
+
+  '4.1.1':
+    type: automatic
+    command: "{{ cis_package_present_check | replace('__PACKAGE__', 'nftables') }}"
+  '4.2.1':
+    type: automatic
+    requires: [cis_firewall_backend]
+    command: |
+      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
+      [ "$CIS_FIREWALL_BACKEND" != firewalld ] && { echo 'Firewalld is not the selected backend'; exit 0; }
+      actual_services="$(firewall-cmd --list-services 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -u)"
+      approved_services="$(tr ' ' '\n' <<< "$CIS_APPROVED_FIREWALLD_SERVICES" | sed '/^$/d' | sort -u)"
+      actual_ports="$(firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -u)"
+      approved_ports="$(tr ' ' '\n' <<< "$CIS_APPROVED_FIREWALLD_PORTS" | sed '/^$/d' | sort -u)"
+      bad_services="$(comm -23 <(printf '%s\n' "$actual_services") <(printf '%s\n' "$approved_services"))"
+      bad_ports="$(comm -23 <(printf '%s\n' "$actual_ports") <(printf '%s\n' "$approved_ports"))"
+      printf 'unapproved services=%s ports=%s\n' "${bad_services:-none}" "${bad_ports:-none}"
+      [ -z "$bad_services$bad_ports" ]
+  '4.2.2':
+    type: automatic
+    requires: [cis_firewall_backend]
+    command: |
+      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
+      [ "$CIS_FIREWALL_BACKEND" != firewalld ] && { echo 'Firewalld is not the selected backend'; exit 0; }
+      systemctl is-active --quiet firewalld || { echo 'firewalld is not active'; exit 1; }
+      zone="$(firewall-cmd --get-zone-of-interface=lo 2>/dev/null)"
+      echo "loopback_zone=${zone:-none}"
+      [ -n "$zone" ]
+  '4.3.1':
+    type: automatic
+    requires: [cis_firewall_backend]
+    requires_when:
+      variable: cis_firewall_backend
+      equals: nftables
+      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    command: |
+      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
+      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
+      rules="$(nft list ruleset 2>/dev/null)" || exit 2
+      printf '%s\n' "$rules" | grep -Pq 'hook\h+input\b' &&
+        printf '%s\n' "$rules" | grep -Pq 'hook\h+forward\b' &&
+        printf '%s\n' "$rules" | grep -Pq 'hook\h+output\b'
+  '4.3.2':
+    type: automatic
+    requires: [cis_firewall_backend]
+    requires_when:
+      variable: cis_firewall_backend
+      equals: nftables
+      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    command: |
+      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
+      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
+      rules="$(nft list ruleset 2>/dev/null)" || exit 2
+      printf '%s\n' "$rules" | grep -Pq 'ct\h+state\h+([^#\n]*,)?established([^#\n]*,)?related\h+accept'
+  '4.3.3':
+    type: automatic
+    requires: [cis_firewall_backend]
+    requires_when:
+      variable: cis_firewall_backend
+      equals: nftables
+      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    command: |
+      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
+      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
+      rules="$(nft list ruleset 2>/dev/null)" || exit 2
+      for hook in input forward; do
+        printf '%s\n' "$rules" | grep -Pq "hook\h+$hook\b[^}]*(policy\h+(drop|reject)|counter\h+(drop|reject))" || exit 1
+      done
+
+  '5.1.1':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/ssh/sshd_config
+      mode="$(stat -Lc '%a' /etc/ssh/sshd_config)"
+      [ "$(stat -Lc '%U:%G' /etc/ssh/sshd_config)" = root:root ] && [ "$((8#$mode & 8#177))" -eq 0 ]
+  '5.1.2':
+    type: automatic
+    command: |
+      failed=0
+      while IFS= read -r file; do
+        mode="$(stat -Lc '%a' "$file")" owner="$(stat -Lc '%U:%G' "$file")"
+        echo "$file mode=$mode owner=$owner"
+        [ "$owner" = root:root ] || failed=1
+        [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
+      done < <(find /etc/ssh -xdev -type f -name 'ssh_host_*_key' ! -name '*.pub')
+      exit "$failed"
+  '5.1.3':
+    type: automatic
+    command: |
+      failed=0
+      while IFS= read -r file; do
+        mode="$(stat -Lc '%a' "$file")" owner="$(stat -Lc '%U:%G' "$file")"
+        echo "$file mode=$mode owner=$owner"
+        [ "$owner" = root:root ] || failed=1
+        [ "$((8#$mode & 8#133))" -eq 0 ] || failed=1
+      done < <(find /etc/ssh -xdev -type f -name 'ssh_host_*_key.pub')
+      exit "$failed"
+  '5.1.4':
+    type: automatic
+    command: "{{ cis_sshd_effective_check | replace('__SPEC__', 'ciphers:(^|,)(3des-cbc|aes(128|192|256)-cbc)(,|$)') }}"
+  '5.1.5':
+    type: automatic
+    command: "{{ cis_sshd_effective_check | replace('__SPEC__', 'kexalgorithms:(^|,)(diffie-hellman-group1-sha1|diffie-hellman-group14-sha1|diffie-hellman-group-exchange-sha1)(,|$)') }}"
+  '5.1.6':
+    type: automatic
+    command: "{{ cis_sshd_effective_check | replace('__SPEC__', 'macs:(^|,)(hmac-md5|hmac-md5-96|hmac-ripemd160|hmac-sha1|hmac-sha1-96|umac-64@openssh.com|umac-64-etm@openssh.com)(,|$)') }}"
+  '5.1.7':
+    type: automatic
+    requires: [cis_ssh_access_policy_configured]
+    command: |
+      expected="$CIS_SSH_ALLOWED_USERS$CIS_SSH_ALLOWED_GROUPS$CIS_SSH_DENIED_USERS$CIS_SSH_DENIED_GROUPS"
+      [ -n "$expected" ] || { echo 'No SSH access-control list is configured'; exit 1; }
+      effective="$(sshd -T 2>/dev/null)" || exit 2
+      failed=0
+      for item in \
+        "allowusers:$CIS_SSH_ALLOWED_USERS" "allowgroups:$CIS_SSH_ALLOWED_GROUPS" \
+        "denyusers:$CIS_SSH_DENIED_USERS" "denygroups:$CIS_SSH_DENIED_GROUPS"; do
+        key="${item%%:*}"; wanted="${item#*:}"
+        [ -z "$wanted" ] && continue
+        actual="$(awk -v k="$key" '$1==k {$1=""; sub(/^ /,""); print; exit}' <<< "$effective")"
+        echo "$key actual=${actual:-missing} expected=$wanted"
+        [ "$(tr ' ' '\n' <<< "$actual" | sort -u)" = "$(tr ' ' '\n' <<< "$wanted" | sort -u)" ] || failed=1
+      done
+      [ "$failed" -eq 0 ]
+  '5.1.8':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="banner" {print $2}')" || exit 2
+      echo "banner=$value"
+      [ "$value" = /etc/issue.net ]
+  '5.1.9':
+    type: automatic
+    requires: [cis_ssh_client_alive_interval, cis_ssh_client_alive_count_max]
+    command: |
+      effective="$(sshd -T 2>/dev/null)" || exit 2
+      interval="$(awk '$1=="clientaliveinterval" {print $2}' <<< "$effective")"
+      count="$(awk '$1=="clientalivecountmax" {print $2}' <<< "$effective")"
+      echo "clientaliveinterval=$interval expected=$CIS_SSH_CLIENT_ALIVE_INTERVAL clientalivecountmax=$count expected=$CIS_SSH_CLIENT_ALIVE_COUNT_MAX"
+      [ "$interval" = "$CIS_SSH_CLIENT_ALIVE_INTERVAL" ] && [ "$count" = "$CIS_SSH_CLIENT_ALIVE_COUNT_MAX" ]
+  '5.1.12':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="hostbasedauthentication" {print $2}')" || exit 2
+      echo "hostbasedauthentication=$value"
+      [ "$value" = no ]
+  '5.1.13':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="ignorerhosts" {print $2}')" || exit 2
+      echo "ignorerhosts=$value"
+      [ "$value" = yes ]
+  '5.1.14':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="logingracetime" {print $2}')" || exit 2
+      echo "logingracetime=$value"
+      [ "$value" -ge 1 ] && [ "$value" -le 60 ]
+  '5.1.15':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="loglevel" {print toupper($2)}')" || exit 2
+      echo "loglevel=$value"
+      [ "$value" = INFO ] || [ "$value" = VERBOSE ]
+  '5.1.16':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="maxauthtries" {print $2}')" || exit 2
+      echo "maxauthtries=$value"
+      [ "$value" -le 4 ]
+  '5.1.17':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="maxstartups" {print $2}')" || exit 2
+      echo "maxstartups=$value"
+      IFS=: read -r start rate full <<< "$value"
+      [ "${start:-999}" -le 10 ] && [ "${rate:-999}" -le 30 ] && [ "${full:-999}" -le 60 ]
+  '5.1.18':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="maxsessions" {print $2}')" || exit 2
+      echo "maxsessions=$value"
+      [ "$value" -le 10 ]
+  '5.1.19':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="permitemptypasswords" {print $2}')" || exit 2
+      echo "permitemptypasswords=$value"
+      [ "$value" = no ]
+  '5.1.20':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin" {print $2}')" || exit 2
+      echo "permitrootlogin=$value"
+      [ "$value" = no ]
+  '5.1.21':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="permituserenvironment" {print $2}')" || exit 2
+      echo "permituserenvironment=$value"
+      [ "$value" = no ]
+  '5.1.22':
+    type: automatic
+    command: |
+      value="$(sshd -T 2>/dev/null | awk '$1=="usepam" {print $2}')" || exit 2
+      echo "usepam=$value"
+      [ "$value" = yes ]
+  '5.2.1':
+    type: automatic
+    command: "{{ cis_package_present_check | replace('__PACKAGE__', 'sudo') }}"
+  '5.2.2':
+    type: automatic
+    command: |
+      output="$(grep -RPh '^[[:space:]]*Defaults([^#]*,)?[[:space:]]*use_pty\b' /etc/sudoers /etc/sudoers.d 2>/dev/null || true)"
+      echo "${output:-use_pty not configured}"
+      [ -n "$output" ]
+  '5.2.3':
+    type: automatic
+    command: |
+      output="$(grep -RPh '^[[:space:]]*Defaults([^#]*,)?[[:space:]]*logfile[[:space:]]*=' /etc/sudoers /etc/sudoers.d 2>/dev/null || true)"
+      echo "${output:-sudo logfile not configured}"
+      [ -n "$output" ]
+  '5.2.5':
+    type: automatic
+    command: |
+      output="$(grep -RPh '^[[:space:]]*Defaults.*!authenticate\b' /etc/sudoers /etc/sudoers.d 2>/dev/null || true)"
+      echo "${output:-No !authenticate setting}"
+      [ -z "$output" ]
+  '5.2.6':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*Defaults.*timestamp_timeout[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/sudoers /etc/sudoers.d 2>/dev/null | tail -1)"
+      value="${value:-15}"
+      echo "timestamp_timeout=$value"
+      [ "$value" -ge 0 ] && [ "$value" -le 15 ]
+  '5.3.1.1':
+    type: automatic
+    command: |
+      rpm -q pam || exit 1
+      output="$(dnf -q check-update pam 2>&1)"; rc=$?
+      printf '%s\n' "$output"
+      [ "$rc" -eq 0 ] && exit 0
+      [ "$rc" -eq 100 ] && exit 1
+      exit 2
+  '5.3.1.2':
+    type: automatic
+    command: |
+      rpm -q authselect || exit 1
+      output="$(dnf -q check-update authselect 2>&1)"; rc=$?
+      printf '%s\n' "$output"
+      [ "$rc" -eq 0 ] && exit 0
+      [ "$rc" -eq 100 ] && exit 1
+      exit 2
+  '5.3.1.3':
+    type: automatic
+    command: |
+      rpm -q libpwquality || exit 1
+      output="$(dnf -q check-update libpwquality 2>&1)"; rc=$?
+      printf '%s\n' "$output"
+      [ "$rc" -eq 0 ] && exit 0
+      [ "$rc" -eq 100 ] && exit 1
+      exit 2
+  '5.3.2.1':
+    type: automatic
+    command: |
+      authselect check || exit 1
+      files="$(authselect current -r 2>/dev/null | awk 'NR==1 {print $1}')"
+      echo "profile=${files:-unknown}"
+      for module in pam_faillock.so pam_pwquality.so pam_pwhistory.so pam_unix.so; do
+        grep -Rqs "$module" /etc/authselect/system-auth /etc/authselect/password-auth || { echo "$module missing"; exit 1; }
+      done
+  '5.3.2.2':
+    type: automatic
+    command: |
+      grep -qs 'pam_faillock\.so' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null
+  '5.3.2.3':
+    type: automatic
+    command: |
+      grep -qs 'pam_pwquality\.so' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null
+  '5.3.2.4':
+    type: automatic
+    command: |
+      grep -qs 'pam_pwhistory\.so' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null
+  '5.3.2.5':
+    type: automatic
+    command: |
+      grep -qs 'pam_unix\.so' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null
+  '5.3.3.1.1':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*deny[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/faillock.conf /etc/security/faillock.conf.d 2>/dev/null | tail -1)"
+      echo "deny=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -le 5 ]
+  '5.3.3.1.2':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*unlock_time[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/faillock.conf /etc/security/faillock.conf.d 2>/dev/null | tail -1)"
+      echo "unlock_time=${value:-unset}"
+      [ -n "$value" ] && { [ "$value" -eq 0 ] || [ "$value" -ge 900 ]; }
+  '5.3.3.2.1':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*difok[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
+      echo "difok=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -ge 2 ]
+  '5.3.3.2.2':
+    type: automatic
+    command: |
+      value="$(find /etc/security -maxdepth 2 -type f \( -name pwquality.conf -o -path '*/pwquality.conf.d/*.conf' \) -exec awk -F= '/^[[:space:]]*minlen[[:space:]]*=/ {v=$2; sub(/[[:space:]]*[#;].*/,"",v); gsub(/[[:space:]]/,"",v); print v}' {} + 2>/dev/null | tail -1)"
+      echo "minlen=${value:-unset}"
+      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$CIS_PASSWORD_MIN_LENGTH" ]
+  '5.3.3.2.3':
+    type: automatic
+    command: |
+      value="$(find /etc/security -maxdepth 2 -type f \( -name pwquality.conf -o -path '*/pwquality.conf.d/*.conf' \) -exec awk -F= '/^[[:space:]]*minclass[[:space:]]*=/ {v=$2; sub(/[[:space:]]*[#;].*/,"",v); gsub(/[[:space:]]/,"",v); print v}' {} + 2>/dev/null | tail -1)"
+      echo "minclass=${value:-unset}"
+      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$CIS_PASSWORD_MIN_CLASSES" ]
+  '5.3.3.2.4':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*maxrepeat[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
+      echo "maxrepeat=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 3 ]
+  '5.3.3.2.5':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*maxsequence[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
+      echo "maxsequence=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 3 ]
+  '5.3.3.2.6':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*dictcheck[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
+      value="${value:-1}"
+      echo "dictcheck=$value"
+      [ "$value" = 1 ]
+  '5.3.3.2.7':
+    type: automatic
+    command: |
+      grep -RPh '^[[:space:]]*enforce_for_root\b' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null
+  '5.3.3.3.1':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*remember[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/pwhistory.conf /etc/security/pwhistory.conf.d 2>/dev/null | tail -1)"
+      echo "remember=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -ge 24 ]
+  '5.3.3.3.2':
+    type: automatic
+    command: |
+      find /etc/security -maxdepth 2 -type f \( -name pwhistory.conf -o -path '*/pwhistory.conf.d/*.conf' \) -exec grep -HnE '^[[:space:]]*enforce_for_root([[:space:]]|$)' {} + 2>/dev/null | grep -q .
+  '5.3.3.3.3':
+    type: automatic
+    command: |
+      lines="$(grep -Ph '^[^#]*(password)[[:space:]]+(requisite|required|sufficient)[[:space:]]+pam_pwhistory\.so.*' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null)"
+      echo "$lines"
+      [ -n "$lines" ] && ! grep -Pvq '\buse_authtok\b' <<< "$lines"
+  '5.3.3.4.1':
+    type: automatic
+    command: |
+      lines="$(grep -Ph '^[^#]*(password|auth|account|session)[[:space:]]+.*pam_unix\.so.*' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null)"
+      echo "$lines"
+      [ -n "$lines" ] && ! grep -Pq '\bnullok\b' <<< "$lines"
+  '5.3.3.4.2':
+    type: automatic
+    command: |
+      lines="$(grep -Ph '^[^#]*password[[:space:]]+.*pam_unix\.so.*' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null)"
+      echo "$lines"
+      [ -n "$lines" ] && ! grep -Pq '\bremember=' <<< "$lines"
+  '5.3.3.4.3':
+    type: automatic
+    command: |
+      lines="$(grep -Ph '^[^#]*password[[:space:]]+.*pam_unix\.so.*' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null)"
+      echo "$lines"
+      grep -Pq '\b(sha512|yescrypt)\b' <<< "$lines"
+  '5.3.3.4.4':
+    type: automatic
+    command: |
+      lines="$(grep -Ph '^[^#]*password[[:space:]]+.*pam_unix\.so.*' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null)"
+      echo "$lines"
+      grep -Pq '\buse_authtok\b' <<< "$lines"
+  '5.4.1.3':
+    type: automatic
+    command: |
+      value="$(awk '$1=="PASS_WARN_AGE" {print $2}' /etc/login.defs | tail -1)"
+      echo "PASS_WARN_AGE=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -ge 7 ]
+  '5.4.1.4':
+    type: automatic
+    command: |
+      value="$(awk '$1=="ENCRYPT_METHOD" {print toupper($2)}' /etc/login.defs | tail -1)"
+      echo "ENCRYPT_METHOD=${value:-unset}"
+      [ "$value" = SHA512 ] || [ "$value" = YESCRYPT ]
+  '5.4.1.6':
+    type: automatic
+    command: |
+      now="$(date +%s)"; failed=0
+      while IFS=: read -r user _ last _; do
+        [ -z "$last" ] && continue
+        changed="$((last * 86400))"
+        if [ "$changed" -gt "$now" ]; then echo "$user last-change is in the future"; failed=1; fi
+      done < /etc/shadow
+      [ "$failed" -eq 0 ] && echo 'All recorded password change dates are current or past'
+      exit "$failed"
+  '5.4.2.1':
+    type: automatic
+    command: |
+      output="$(awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd)"
+      echo "${output:-root is the only UID 0 account}"
+      [ -z "$output" ]
+  '5.4.2.3':
+    type: automatic
+    command: |
+      output="$(awk -F: '$3==0 && $1!="root" {print $1}' /etc/group)"
+      echo "${output:-root is the only GID 0 group}"
+      [ -z "$output" ]
+  '5.4.2.4':
+    type: automatic
+    command: |
+      status="$(passwd -S root 2>/dev/null | awk '{print $2}')" || exit 2
+      echo "root password status=$status"
+      [ "$status" = P ] || [ "$status" = L ] || [ "$status" = LK ]
+  '5.4.2.5':
+    type: automatic
+    command: |
+      failed=0 oldifs="$IFS" IFS=:
+      for dir in $PATH; do
+        IFS="$oldifs"
+        [ -z "$dir" ] && { echo 'PATH contains an empty element'; failed=1; continue; }
+        [ "$dir" = . ] && { echo 'PATH contains dot'; failed=1; continue; }
+        [ -d "$dir" ] || { echo "$dir is not a directory"; failed=1; continue; }
+        owner="$(stat -Lc '%U' "$dir")" mode="$(stat -Lc '%a' "$dir")"
+        echo "$dir mode=$mode owner=$owner"
+        [ "$owner" = root ] || failed=1
+        [ "$((8#$mode & 8#022))" -eq 0 ] || failed=1
+        IFS=:
+      done
+      IFS="$oldifs"; exit "$failed"
+  '5.4.2.6':
+    type: automatic
+    command: |
+      output="$(grep -RPh '^[[:space:]]*umask[[:space:]]+(0027|027|0077|077)\b' /root/.bash_profile /root/.bashrc /etc/profile /etc/bashrc 2>/dev/null || true)"
+      echo "${output:-Compliant root umask not found}"
+      [ -n "$output" ]
+  '5.4.2.8':
+    type: automatic
+    command: |
+      valid="$(grep -Ev '^[[:space:]]*(#|$)' /etc/shells | paste -sd'|' -)"
+      output="$(awk -F: -v re="^(${valid})$" '$7 !~ re && $2 !~ /^(!|\*)/ {print $1}' /etc/passwd)"
+      echo "${output:-All non-login accounts are locked}"
+      [ -z "$output" ]
+  '5.4.3.2':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*(readonly[[:space:]]+)?TMOUT[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/profile /etc/bashrc /etc/profile.d 2>/dev/null | sort -n | tail -1)"
+      echo "TMOUT=${value:-unset}"
+      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 900 ]
+  '5.4.3.3':
+    type: automatic
+    command: |
+      output="$(grep -RPh '^[[:space:]]*umask[[:space:]]+(0027|027|0077|077)\b' /etc/profile /etc/bashrc /etc/profile.d 2>/dev/null || true)"
+      echo "${output:-Compliant default umask not found}"
+      [ -n "$output" ]
+
+  '7.1.1':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/passwd
+      mode="$(stat -Lc '%a' /etc/passwd)"
+      [ "$(stat -Lc '%U:%G' /etc/passwd)" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '7.1.2':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/passwd-
+      mode="$(stat -Lc '%a' /etc/passwd-)"
+      [ "$(stat -Lc '%U:%G' /etc/passwd-)" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '7.1.3':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/group
+      mode="$(stat -Lc '%a' /etc/group)"
+      [ "$(stat -Lc '%U:%G' /etc/group)" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '7.1.4':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/group-
+      mode="$(stat -Lc '%a' /etc/group-)"
+      [ "$(stat -Lc '%U:%G' /etc/group-)" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '7.1.5':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/shadow
+      mode="$(stat -Lc '%a' /etc/shadow)"
+      [ "$(stat -Lc '%U:%G' /etc/shadow)" = root:root ] && [ "$((8#$mode & 8#777))" -eq 0 ]
+  '7.1.6':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/shadow-
+      mode="$(stat -Lc '%a' /etc/shadow-)"
+      [ "$(stat -Lc '%U:%G' /etc/shadow-)" = root:root ] && [ "$((8#$mode & 8#777))" -eq 0 ]
+  '7.1.7':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/gshadow
+      mode="$(stat -Lc '%a' /etc/gshadow)"
+      [ "$(stat -Lc '%U:%G' /etc/gshadow)" = root:root ] && [ "$((8#$mode & 8#777))" -eq 0 ]
+  '7.1.8':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/gshadow-
+      mode="$(stat -Lc '%a' /etc/gshadow-)"
+      [ "$(stat -Lc '%U:%G' /etc/gshadow-)" = root:root ] && [ "$((8#$mode & 8#777))" -eq 0 ]
+  '7.1.9':
+    type: automatic
+    command: |
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/shells
+      mode="$(stat -Lc '%a' /etc/shells)"
+      [ "$(stat -Lc '%U:%G' /etc/shells)" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+  '7.1.10':
+    type: automatic
+    command: |
+      if [ ! -e /etc/security/opasswd ]; then
+        echo '/etc/security/opasswd does not exist'
+        exit 0
+      fi
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/security/opasswd
+      mode="$(stat -Lc '%a' /etc/security/opasswd)"
+      [ "$(stat -Lc '%U:%G' /etc/security/opasswd)" = root:root ] && [ "$((8#$mode & 8#177))" -eq 0 ]
+  '7.1.11':
+    type: automatic
+    command: |
+      findings="$(findmnt -rn -t ext2,ext3,ext4,xfs,btrfs -o TARGET | while IFS= read -r mount; do
+        find "$mount" -xdev \( -type f -perm -0002 -o -type d -perm -0002 ! -perm -1000 \) -print 2>/dev/null
+      done | sort -u)"
+      bad="$(while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        grep -Fqx -- "$path" <<< "$CIS_APPROVED_WORLD_WRITABLE_PATHS" || printf '%s\n' "$path"
+      done <<< "$findings")"
+      printf 'unapproved world-writable paths:\n%s\n' "${bad:-none}"
+      [ -z "$bad" ]
+  '7.1.12':
+    type: automatic
+    requires: [cis_filesystem_review_completed]
+    command: |
+      findings="$(findmnt -rn -t ext2,ext3,ext4,xfs,btrfs -o TARGET | while IFS= read -r mount; do
+        find "$mount" -xdev \( -nouser -o -nogroup \) -print 2>/dev/null
+      done | sort -u)"
+      bad="$(while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        grep -Fqx -- "$path" <<< "$CIS_APPROVED_UNOWNED_PATHS" || printf '%s\n' "$path"
+      done <<< "$findings")"
+      printf 'unapproved unowned paths:\n%s\n' "${bad:-none}"
+      [ -z "$bad" ]
+  '7.1.13':
+    type: automatic
+    requires: [cis_privileged_file_inventory_completed]
+    command: |
+      findings="$(findmnt -rn -t ext2,ext3,ext4,xfs,btrfs -o TARGET | while IFS= read -r mount; do
+        find "$mount" -xdev -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null
+      done | sort -u)"
+      expected="$(printf '%s\n' "$CIS_APPROVED_SUID_SGID_PATHS" | sed '/^$/d' | sort -u)"
+      printf 'actual privileged files:\n%s\n' "$findings"
+      [ "$findings" = "$expected" ]
+  '7.2.1':
+    type: automatic
+    command: |
+      output="$(awk -F: '$2 != "x" {print $1}' /etc/passwd)"
+      echo "${output:-All passwd entries use shadowed passwords}"
+      [ -z "$output" ]
+  '7.2.2':
+    type: automatic
+    command: |
+      output="$(awk -F: '$2 == "" {print $1}' /etc/shadow)"
+      echo "${output:-No empty shadow password fields}"
+      [ -z "$output" ]
+  '7.2.3':
+    type: automatic
+    command: |
+      output="$(awk -F: 'NR==FNR {g[$3]=1; next} !($4 in g) {print $1 ":" $4}' /etc/group /etc/passwd)"
+      echo "${output:-All passwd primary groups exist}"
+      [ -z "$output" ]
+  '7.2.4':
+    type: automatic
+    command: |
+      output="$(cut -d: -f3 /etc/passwd | sort | uniq -d)"
+      echo "${output:-No duplicate UIDs}"
+      [ -z "$output" ]
+  '7.2.5':
+    type: automatic
+    command: |
+      output="$(cut -d: -f3 /etc/group | sort | uniq -d)"
+      echo "${output:-No duplicate GIDs}"
+      [ -z "$output" ]
+  '7.2.6':
+    type: automatic
+    command: |
+      output="$(cut -d: -f1 /etc/passwd | sort | uniq -d)"
+      echo "${output:-No duplicate user names}"
+      [ -z "$output" ]
+  '7.2.7':
+    type: automatic
+    command: |
+      output="$(cut -d: -f1 /etc/group | sort | uniq -d)"
+      echo "${output:-No duplicate group names}"
+      [ -z "$output" ]
+  '7.2.8':
+    type: automatic
+    command: |
+      uid_min="$(awk '$1=="UID_MIN" {print $2}' /etc/login.defs | tail -1)"; uid_min="${uid_min:-1000}"
+      users="$CIS_LOCAL_INTERACTIVE_USERS"
+      [ -n "$users" ] || users="$(awk -F: -v min="$uid_min" '$3>=min && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd)"
+      failed=0
+      for user in $users; do
+        entry="$(getent passwd "$user")" || { echo "$user missing"; failed=1; continue; }
+        home="$(cut -d: -f6 <<< "$entry")"
+        [ -d "$home" ] || { echo "$user home missing: $home"; failed=1; continue; }
+        owner="$(stat -Lc '%U' "$home")"; mode="$(stat -Lc '%a' "$home")"
+        echo "$user home=$home owner=$owner mode=$mode"
+        [ "$owner" = "$user" ] || failed=1
+        [ "$((8#$mode & 8#027))" -eq 0 ] || failed=1
+      done
+      [ "$failed" -eq 0 ]
+  '7.2.9':
+    type: automatic
+    command: |
+      uid_min="$(awk '$1=="UID_MIN" {print $2}' /etc/login.defs | tail -1)"; uid_min="${uid_min:-1000}"
+      users="$CIS_LOCAL_INTERACTIVE_USERS"
+      [ -n "$users" ] || users="$(awk -F: -v min="$uid_min" '$3>=min && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd)"
+      failed=0
+      for user in $users; do
+        home="$(getent passwd "$user" | cut -d: -f6)"; [ -d "$home" ] || continue
+        for prohibited in .forward .rhosts; do
+          [ ! -e "$home/$prohibited" ] || { echo "$user prohibited $home/$prohibited"; failed=1; }
+        done
+        while IFS= read -r file; do
+          owner="$(stat -Lc '%U' "$file")"; mode="$(stat -Lc '%a' "$file")"
+          echo "$file owner=$owner mode=$mode"
+          [ "$owner" = "$user" ] || failed=1
+          [ "$((8#$mode & 8#022))" -eq 0 ] || failed=1
+          [ "$(basename "$file")" != .netrc ] || [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
+        done < <(find "$home" -xdev -maxdepth 1 -type f -name '.*' -print 2>/dev/null)
+      done
+      [ "$failed" -eq 0 ]
+
+  '6.1.1':
+    type: automatic
+    command: "{{ cis_package_present_check | replace('__PACKAGE__', 'aide') }}"
+  '6.1.2':
+    type: automatic
+    command: |
+      timers="$(systemctl list-timers --all --no-legend 2>/dev/null | grep -Ei 'aide(check)?' || true)"
+      cron="$(grep -RHiE '(^|[[:space:]])aide(\.wrapper)?[[:space:]].*(--check|--update)|aidecheck' /etc/cron.* /etc/crontab 2>/dev/null || true)"
+      printf '%s\n%s\n' "$timers" "$cron"
+      [ -n "$timers$cron" ]
+  '6.1.3':
+    type: automatic
+    command: |
+      config="$(aide --config-check 2>/dev/null; grep -RhsE '^[[:space:]]*/(usr/)?s?bin/(auditctl|auditd|ausearch|aureport|autrace|augenrules)[[:space:]]' /etc/aide.conf /etc/aide.conf.d 2>/dev/null)"
+      printf '%s\n' "$config"
+      for tool in auditctl auditd ausearch aureport autrace augenrules; do
+        grep -Pq "/(usr/)?s?bin/$tool\h+.*(sha512|sha256)" <<< "$config" || exit 1
+      done
+  '6.2.1.1':
+    type: automatic
+    command: |
+      active="$(systemctl is-active systemd-journald.service 2>/dev/null || true)"
+      echo "systemd-journald active=$active"
+      [ "$active" = active ]
+  '6.2.1.2':
+    type: automatic
+    command: |
+      failed=0
+      for dir in /var/log/journal /run/log/journal; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r path; do
+          mode="$(stat -Lc '%a' "$path")"
+          echo "$path mode=$mode"
+          [ "$((8#$mode & 8#007))" -eq 0 ] || failed=1
+        done < <(find "$dir" -xdev -type f -o -type d)
+      done
+      exit "$failed"
+  '6.2.1.3':
+    type: automatic
+    requires: [cis_logging_backend]
+    requires_when:
+      variable: cis_logging_backend
+      equals: journald
+      inputs:
+        - cis_journald_system_max_use
+        - cis_journald_system_keep_free
+        - cis_journald_runtime_max_use
+        - cis_journald_runtime_keep_free
+        - cis_journald_max_file_sec
+    command: |
+      [ "$CIS_LOGGING_BACKEND" != journald ] && { echo 'Journald is not the selected exclusive backend'; exit 0; }
+      for item in "$CIS_JOURNALD_SYSTEM_MAX_USE" "$CIS_JOURNALD_SYSTEM_KEEP_FREE" "$CIS_JOURNALD_RUNTIME_MAX_USE" "$CIS_JOURNALD_RUNTIME_KEEP_FREE" "$CIS_JOURNALD_MAX_FILE_SEC"; do
+        [ -n "$item" ] || { echo 'A journald rotation policy value is missing'; exit 1; }
+      done
+      config="$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null)" || exit 2
+      failed=0
+      for spec in \
+        "SystemMaxUse:$CIS_JOURNALD_SYSTEM_MAX_USE" "SystemKeepFree:$CIS_JOURNALD_SYSTEM_KEEP_FREE" \
+        "RuntimeMaxUse:$CIS_JOURNALD_RUNTIME_MAX_USE" "RuntimeKeepFree:$CIS_JOURNALD_RUNTIME_KEEP_FREE" \
+        "MaxFileSec:$CIS_JOURNALD_MAX_FILE_SEC"; do
+        key="${spec%%:*}"; expected="${spec#*:}"
+        actual="$(awk -F= -v k="$key" '$1==k {v=$2} END {gsub(/[[:space:]]/,"",v); print v}' <<< "$config")"
+        echo "$key=${actual:-missing} expected=$expected"
+        [ "$actual" = "$expected" ] || failed=1
+      done
+      [ "$failed" -eq 0 ]
+  '6.2.1.4':
+    type: automatic
+    requires: [cis_logging_backend]
+    command: |
+      [ "$CIS_LOGGING_BACKEND" = review ] && { echo 'Logging backend policy is not set'; exit 1; }
+      journal_active="$(systemctl is-active systemd-journald.service 2>/dev/null || true)"
+      rsyslog_active="$(systemctl is-active rsyslog.service 2>/dev/null || true)"
+      echo "policy=$CIS_LOGGING_BACKEND journald=$journal_active rsyslog=$rsyslog_active"
+      case "$CIS_LOGGING_BACKEND" in
+        journald) [ "$journal_active" = active ] && [ "$rsyslog_active" != active ] ;;
+        rsyslog) [ "$journal_active" = active ] && [ "$rsyslog_active" = active ] ;;
+        *) exit 2 ;;
+      esac
+  '6.2.2.1.2':
+    type: automatic
+    requires: [cis_journal_upload_policy_configured]
+    command: |
+      [ "$CIS_JOURNAL_UPLOAD_ENABLED" = true ] || { echo 'Journal upload is disabled by site policy'; exit 0; }
+      for item in "$CIS_JOURNAL_UPLOAD_URL" "$CIS_JOURNAL_UPLOAD_SERVER_KEY_FILE" "$CIS_JOURNAL_UPLOAD_SERVER_CERTIFICATE_FILE" "$CIS_JOURNAL_UPLOAD_TRUSTED_CERTIFICATE_FILE"; do
+        [ -n "$item" ] || { echo 'A journal-upload policy value is missing'; exit 1; }
+      done
+      config="$(systemd-analyze cat-config systemd/journal-upload.conf 2>/dev/null)" || exit 2
+      grep -Fq "URL=$CIS_JOURNAL_UPLOAD_URL" <<< "$config" &&
+        grep -Fq "ServerKeyFile=$CIS_JOURNAL_UPLOAD_SERVER_KEY_FILE" <<< "$config" &&
+        grep -Fq "ServerCertificateFile=$CIS_JOURNAL_UPLOAD_SERVER_CERTIFICATE_FILE" <<< "$config" &&
+        grep -Fq "TrustedCertificateFile=$CIS_JOURNAL_UPLOAD_TRUSTED_CERTIFICATE_FILE" <<< "$config" &&
+        [ -r "$CIS_JOURNAL_UPLOAD_SERVER_KEY_FILE" ] &&
+        [ -r "$CIS_JOURNAL_UPLOAD_SERVER_CERTIFICATE_FILE" ] &&
+        [ -r "$CIS_JOURNAL_UPLOAD_TRUSTED_CERTIFICATE_FILE" ]
+  '6.2.2.1.4':
+    type: automatic
+    command: |
+      enabled="$(systemctl is-enabled systemd-journal-remote.socket systemd-journal-remote.service 2>/dev/null || true)"
+      active="$(systemctl is-active systemd-journal-remote.socket systemd-journal-remote.service 2>/dev/null || true)"
+      printf 'enabled=%s active=%s\n' "$enabled" "$active"
+      ! grep -qx enabled <<< "$enabled" && ! grep -qx active <<< "$active"
+  '6.2.3.1':
+    type: automatic
+    command: "{{ cis_package_present_check | replace('__PACKAGE__', 'rsyslog') }}"
+  '6.2.3.2':
+    type: automatic
+    command: |
+      enabled="$(systemctl is-enabled rsyslog.service 2>/dev/null || true)"
+      active="$(systemctl is-active rsyslog.service 2>/dev/null || true)"
+      echo "rsyslog enabled=$enabled active=$active"
+      [ "$enabled" = enabled ] && [ "$active" = active ]
+  '6.2.3.3':
+    type: automatic
+    command: |
+      value="$(systemd-analyze cat-config systemd/journald.conf systemd/journald.conf.d/* 2>/dev/null | awk -F= '/^[[:space:]]*ForwardToSyslog=/ {gsub(/[[:space:]]/,"",$2); v=tolower($2)} END {print v}')"
+      echo "ForwardToSyslog=${value:-unset}"
+      [ "$value" = yes ]
+  '6.2.3.4':
+    type: automatic
+    command: |
+      value="$(grep -RPh '^[[:space:]]*\$FileCreateMode[[:space:]]+\K0?[0-7]+' /etc/rsyslog.conf /etc/rsyslog.d 2>/dev/null | tail -1)"
+      echo "FileCreateMode=${value:-missing}"
+      [ -n "$value" ] || exit 1
+      [ "$((8#$value & 8#137))" -eq 0 ]
+  '6.2.3.5':
+    type: automatic
+    requires: [cis_logging_backend]
+    requires_when:
+      variable: cis_logging_backend
+      equals: rsyslog
+      inputs: [cis_rsyslog_policy_configured, cis_rsyslog_required_routes]
+    command: |
+      [ "$CIS_LOGGING_BACKEND" != rsyslog ] && { echo 'Rsyslog is not the selected backend'; exit 0; }
+      [ -n "$CIS_RSYSLOG_REQUIRED_ROUTES" ] || { echo 'Required rsyslog route list is empty'; exit 1; }
+      config="$(grep -RhsEv '^[[:space:]]*(#|$)' /etc/rsyslog.conf /etc/rsyslog.d 2>/dev/null || true)"
+      failed=0
+      while IFS= read -r route; do
+        [ -z "$route" ] && continue
+        grep -Fq -- "$route" <<< "$config" || { echo "Missing route: $route"; failed=1; }
+      done < <(sed 's/;;/\n/g' <<< "$CIS_RSYSLOG_REQUIRED_ROUTES")
+      [ "$failed" -eq 0 ]
+  '6.2.3.6':
+    type: automatic
+    requires: [cis_logging_backend]
+    requires_when:
+      variable: cis_logging_backend
+      equals: rsyslog
+      inputs: [cis_rsyslog_policy_configured, cis_remote_log_host, cis_remote_log_port, cis_remote_log_protocol]
+    command: |
+      [ "$CIS_LOGGING_BACKEND" != rsyslog ] && { echo 'Rsyslog is not the selected backend'; exit 0; }
+      [ -n "$CIS_REMOTE_LOG_HOST" ] || { echo 'Remote log host is missing'; exit 1; }
+      prefix='@@'; [ "$CIS_REMOTE_LOG_PROTOCOL" = udp ] && prefix='@'
+      expected="${prefix}${CIS_REMOTE_LOG_HOST}:${CIS_REMOTE_LOG_PORT}"
+      echo "expected remote target=$expected"
+      grep -RhsEv '^[[:space:]]*#' /etc/rsyslog.conf /etc/rsyslog.d 2>/dev/null | grep -Fq -- "$expected"
+  '6.2.3.7':
+    type: automatic
+    command: |
+      bad="$(grep -RPinE '^[[:space:]]*(\$ModLoad[[:space:]]+imtcp\b|\$InputTCPServerRun\b|module\([[:space:]]*load="?imtcp"?\)|input\([[:space:]]*type="?imtcp"?\b)' /etc/rsyslog.conf /etc/rsyslog.d 2>/dev/null || true)"
+      echo "${bad:-No rsyslog TCP receiver configuration found}"
+      [ -z "$bad" ]
+  '6.2.3.8':
+    type: automatic
+    requires: [cis_logging_backend]
+    requires_when:
+      variable: cis_logging_backend
+      equals: rsyslog
+      inputs: [cis_rsyslog_policy_configured, cis_rsyslog_rotation_frequency, cis_rsyslog_rotation_count]
+    command: |
+      [ "$CIS_LOGGING_BACKEND" != rsyslog ] && { echo 'Rsyslog is not the selected backend'; exit 0; }
+      [ -r /etc/logrotate.d/rsyslog ] || { echo '/etc/logrotate.d/rsyslog is missing'; exit 1; }
+      grep -Eq "^[[:space:]]*$CIS_RSYSLOG_ROTATION_FREQUENCY([[:space:]]|$)" /etc/logrotate.d/rsyslog &&
+        grep -Eq "^[[:space:]]*rotate[[:space:]]+$CIS_RSYSLOG_ROTATION_COUNT([[:space:]]|$)" /etc/logrotate.d/rsyslog
+  '6.2.4.1':
+    type: automatic
+    requires: [cis_log_file_policy_configured]
+    command: |
+      failed=0
+      while IFS= read -r file; do
+        grep -Fqx -- "$file" <<< "$CIS_APPLICATION_LOG_EXCEPTIONS" && continue
+        mode="$(stat -Lc '%a' "$file")"; owner="$(stat -Lc '%U' "$file")"; group="$(stat -Lc '%G' "$file")"
+        if [ "$((8#$mode & 8#137))" -ne 0 ] || { [ "$owner" != root ] && [ "$owner" != syslog ]; } ||
+          { [ "$group" != root ] && [ "$group" != adm ] && [ "$group" != systemd-journal ]; }; then
+          echo "$file mode=$mode owner=$owner:$group"; failed=1
+        fi
+      done < <(find /var/log -xdev -type f -print 2>/dev/null)
+      [ "$failed" -eq 0 ]
