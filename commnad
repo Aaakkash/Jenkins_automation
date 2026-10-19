@@ -1,0 +1,11 @@
+ansible-playbook -i inventory.ini example/run_all_phases.yml \
+  -e '{
+    "cis_operation": "validate",
+    "cis_phase": "all",
+    "cis_requested_control_ids": [
+      "1.1.1.8", "1.4.1", "5.1.7",
+      "5.1.14", "5.1.15", "5.1.16", "5.1.17",
+      "5.1.18", "5.1.20", "5.2.2", "5.3.2.1",
+      "5.4.2.5", "5.4.2.6", "6.1.2", "6.1.3"
+    ]
+  }'
