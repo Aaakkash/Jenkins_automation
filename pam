@@ -1,3 +1,47 @@
+[nessuslogon@phtlxsbupgr03 ~]$ cat /etc/pam.d/su
+#%PAM-1.0
+auth            required        pam_env.so
+auth            sufficient      pam_rootok.so
+# Uncomment the following line to implicitly trust users in the "wheel" group.
+#auth           sufficient      pam_wheel.so trust use_uid
+# Uncomment the following line to require a user to be in the "wheel" group.
+#auth           required        pam_wheel.so use_uid
+auth            substack        system-auth
+auth            include         postlogin
+account         sufficient      pam_succeed_if.so uid = 0 use_uid quiet
+account         include         system-auth
+password        include         system-auth
+session         include         system-auth
+session         include         postlogin
+session         optional        pam_xauth.so
+[nessuslogon@phtlxsbupgr03 ~]$ cat /etc/pam.d/su-l
+#%PAM-1.0
+auth            include         su
+account         include         su
+password        include         su
+session         optional        pam_keyinit.so force revoke
+session         include         su
+[nessuslogon@phtlxsbupgr03 ~]$ authselect check
+[error] [/etc/authselect/system-auth] has unexpected content!
+[error] [/etc/authselect/password-auth] has unexpected content!
+Current configuration is not valid. It was probably modified outside authselect.
+[nessuslogon@phtlxsbupgr03 ~]$ su - nessuslogon
+Password:
+^Z
+[1]+  Stopped                 su - nessuslogon
+[nessuslogon@phtlxsbupgr03 ~]$
+logout
+There are stopped jobs.
+[nessuslogon@phtlxsbupgr03 ~]$
+logout
+[root@phtlxsbupgr03 ~]# su - nessuslogon
+Last login: Tue Oct 20 14:05:54 EDT 2026 on pts/2
+[nessuslogon@phtlxsbupgr03 ~]$ tail -n 40 /var/log/secure
+tail: cannot open '/var/log/secure' for reading: Permission denied
+[nessuslogon@phtlxsbupgr03 ~]$
+
+
+
 [root@phtlxsbupgr03 ~]# whoami
 root
 [root@phtlxsbupgr03 ~]# id
