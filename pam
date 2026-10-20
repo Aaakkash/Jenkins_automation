@@ -1,3 +1,12 @@
+[root@phtlxsbupgr03 ~]# whoami
+root
+[root@phtlxsbupgr03 ~]# id
+uid=0(root) gid=0(root) groups=0(root) context=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+[root@phtlxsbupgr03 ~]# su - nessuslogon
+Last login: Tue Oct 20 14:00:18 EDT 2026 from 10.198.144.21 on pts/3
+[nessuslogon@phtlxsbupgr03 ~]$
+
+
 [root@phtlxsbupgr03 ~]# sudo chage -l nessuslogon
 Last password change                                    : Jan 24, 2019
 Password expires                                        : never
