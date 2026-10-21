@@ -1,0 +1,244 @@
+Plugin Output
+"Check Name: 7.2.9 Ensure local interactive user dot files access is configured
+
+Information: While the system administrator can establish secure permissions for users' """"dot"""" files, the users can easily override these.
+
+ - .forward file specifies an email address to forward the user's mail to.
+ - .rhost file provides the """"remote authentication"""" database for the rcp, rlogin, and rsh commands and the rcmd() function. These files bypass the standard password-based user authentication mechanism. They specify remote hosts and users that are considered trusted (i.e. are allowed to access the local system without supplying a password)
+ - .netrc file contains data for logging into a remote host or passing authentication to an API.
+ - .bash_history file keeps track of the user's commands.
+
+User configuration files with excessive or incorrect access may enable malicious users to steal or modify other users' data or to gain another user's system privileges.
+
+Result: FAILED
+
+Actual Value: The command script with multiple lines returned : 
+
+- Audit Result:
+  ** FAIL **
+ - * Reasons for audit failure * :
+
+ - User: """"ansible"""" Home Directory: """"/home/ansible""""
+  - File: """"/home/ansible/insts1tUE9/.LinuxInstaller"""" is mode: """"0750"""" and should be mode: """"644"""" or more restrictive
+  - File: """"/home/ansible/insts1tUE9/.LinuxInstaller"""" owned by: """"root"""" and should be owned by """"ansible""""
+  - File: """"/home/ansible/insts1tUE9/.LinuxInstaller"""" group owned by: """"root"""" and should be group owned by """"ansible""""
+
+
+
+- * Correctly configured * :
+  - No local interactive users home directories contain:
+   - """".forward"""" or """".rhost"""" files
+   - """".netrc"""" files with incorrect access configured
+   - """".bash_history"""" files with incorrect access configured
+
+Policy Value: cmd: multiple line script
+dont_echo_cmd: NO
+expect: (?i)^[\s]*\**[\s]*pass:?[\s]*\**$
+timeout: 7200
+
+Solution: Making global modifications to users' files without alerting the user community can result in unexpected outages and unhappy users. Therefore, it is recommended that a monitoring policy be established to report user dot file permissions and determine the action to be taken in accordance with site policy.
+
+The following script will:
+
+ - remove excessive permissions on dot files within interactive users' home directories
+ - change ownership of dot files within interactive users' home directories to the user
+ - change group ownership of dot files within interactive users' home directories to the user's primary group
+ - list .forward and .rhost files to be investigated and manually deleted
+
+#!/usr/bin/env bash
+
+{
+   a_output2=(); a_output3=()
+   l_maxsize=""""1000"""" # Maximum number of local interactive users before warning (Default 1,000)
+   l_valid_shells=""""^($( awk -F\/ '$NF != """"nologin"""" {print}' /etc/shells | sed -rn '/^\//{s,/,\\\\/,g;p}' | paste -s -d '|' - ))$""""
+   a_user_and_home=() # Create array with local users and their home directories
+   while read -r l_local_user l_local_user_home; do # Populate array with users and user home location
+      [[ -n """"$l_local_user"""" && -n """"$l_local_user_home"""" ]] && a_user_and_home+=(""""$l_local_user:$l_local_user_home"""")
+   done <<< """"$(awk -v pat=""""$l_valid_shells"""" -F: '$(NF) ~ pat { print $1 """" """" $(NF-1) }' /etc/passwd)""""
+   l_asize=""""${#a_user_and_home[@]}"""" # Here if we want to look at number of users before proceeding
+   [ """"${#a_user_and_home[@]}"""" -gt """"$l_maxsize"""" ] && printf '%s\n' """""""" """" ** INFO **"""" \
+   """" - \""""$l_asize\"""" Local interactive users found on the system"""" \
+   """" - This may be a long running check"""" """"""""
+   file_access_fix()
+   {
+      a_access_out=()
+      l_max=""""$( printf '%o' $(( 0777 & ~$l_mask)) )""""
+      if [ $(( $l_mode & $l_mask )) -gt 0 ]; then
+         printf '%s\n' """""""" """" - File: \""""$l_hdfile\"""" is mode: \""""$l_mode\"""" and should be mode: \""""$l_max\"""" or more restrictive"""" \
+         """" Updating file: \""""$l_hdfile\"""" to be mode: \""""$l_max\"""" or more restrictive""""
+         chmod """"$l_change"""" """"$l_hdfile""""
+      fi
+      if [[ ! """"$l_owner"""" =~ ($l_user) ]]; then
+         printf '%s\n' """""""" """" - File: \""""$l_hdfile\"""" owned by: \""""$l_owner\"""" and should be owned by \""""${l_user//|/ or }\"""""""" \
+         """" Updating file: \""""$l_hdfile\"""" to be owned by \""""${l_user//|/ or }\""""""""
+         chown """"$l_user"""" """"$l_hdfile""""
+      fi
+      if [[ ! """"$l_gowner"""" =~ ($l_group) ]]; then
+         printf '%s\n' """""""" """" - File: \""""$l_hdfile\"""" group owned by: \""""$l_gowner\"""" and should be group owned by \""""${l_group//|/ or }\"""""""" \
+         """" Updating file: \""""$l_hdfile\"""" to be group owned by \""""${l_group//|/ or }\""""""""
+         chgrp """"$l_group"""" """"$l_hdfile""""
+      fi
+   }
+   while IFS=: read -r l_user l_home; do
+      a_dot_file=(); a_netrc=(); a_netrc_warn=(); a_bhout=(); a_hdirout=()
+      if [ -d """"$l_home"""" ]; then
+         l_group=""""$(id -gn """"$l_user"""" | xargs)"""";l_group=""""${l_group// /|}""""
+         while IFS= read -r -d $'\0' l_hdfile; do
+            while read -r l_mode l_owner l_gowner; do
+               case """"$(basename """"$l_hdfile"""")"""" in
+                  .forward | .rhost )
+                     a_dot_file+=("""" - File: \""""$l_hdfile\"""" exists"""" """" Please review and manually delete this file"""") ;;
+                  .netrc )
+                     l_mask='0177'; l_change=""""u-x,go-rwx""""; file_access_fix
+                     a_netrc_warn+=("""" - File: \""""$l_hdfile\"""" exists"""") ;;
+                  .bash_history )
+                     l_mask='0177'; l_change=""""u-x,go-rwx""""; file_access_fix ;;
+                  * )
+                     l_mask='0133'; l_change=""""u-x,go-wx""""; file_access_fix ;;
+               esac
+            done < <(stat -Lc '%#a %U %G' """"$l_hdfile"""")
+         done < <(find """"$l_home"""" -xdev -type f -name '.*' -print0)
+      fi
+      [ """"${#a_dot_file[@]}"""" -gt 0 ] && a_output2+=("""" - User: \""""$l_user\"""" Home Directory: \""""$l_home\"""""""" """"${a_dot_file[@]}"""")
+      [ """"${#a_netrc_warn[@]}"""" -gt 0 ] && a_output3+=("""" - User: \""""$l_user\"""" Home Directory: \""""$l_home\"""""""" """"${a_netrc_warn[@]}"""")
+   done <<< """"$(printf '%s\n' """"${a_user_and_home[@]}"""")""""
+   [ """"${#a_output3[@]}"""" -gt 0 ] && printf '%s\n' """""""" """" ** WARNING **"""" """"${a_output3[@]}"""" """"""""
+   [ """"${#a_output2[@]}"""" -gt 0 ] && printf '%s\n' """""""" """"${a_output2[@]}""""
+}
+
+See Also: https://workbench.cisecurity.org/benchmarks/18210
+
+Reference Information: 800-171|3.1.1,800-171|3.1.4,800-171|3.1.5,800-171|3.4.1,800-171|3.4.2,800-171|3.4.6,800-171|3.4.7,800-171|3.5.2,800-171|3.8.1,800-171|3.8.2,800-171|3.8.3,800-171r3|03.01.02,800-171r3|03.01.04,800-171r3|03.01.05a.,800-171r3|03.04.01,800-171r3|03.04.02,800-171r3|03.04.06,800-171r3|03.05.12,800-171r3|03.08.02,800-171r3|03.15.01,800-53|AC-3,800-53|AC-5,800-53|AC-6,800-53|CM-1,800-53|CM-2,800-53|CM-6,800-53|CM-7,800-53|IA-5,800-53|MP-2,800-53r5|CM-1,800-53r5|CM-2,800-53r5|CM-6,800-53r5|CM-7,800-53r5|IA-5,CN-L3|7.1.3.2(b),CN-L3|7.1.3.2(g),CN-L3|8.1.4.2(d),CN-L3|8.1.4.2(f),CN-L3|8.1.4.11(b),CN-L3|8.1.10.2(c),CN-L3|8.1.10.6(a),CN-L3|8.5.3.1,CN-L3|8.5.4.1(a),CSCv7|14.6,CSCv8|3.3,CSF|DE.AE-1,CSF|ID.GV-1,CSF|ID.GV-3,CSF|PR.AC-1,CSF|PR.AC-4,CSF|PR.DS-5,CSF|PR.DS-7,CSF|PR.IP-1,CSF|PR.PT-2,CSF|PR.PT-3,CSF2.0|DE.CM-09,CSF2.0|GV.OC-03,CSF2.0|GV.OV-01,CSF2.0|GV.PO-01,CSF2.0|GV.PO-02,CSF2.0|GV.SC-03,CSF2.0|ID.IM-01,CSF2.0|ID.IM-02,CSF2.0|ID.IM-03,CSF2.0|PR.AA-01,CSF2.0|PR.AA-03,CSF2.0|PR.AA-05,CSF2.0|PR.DS-10,CSF2.0|PR.IR-01,CSF2.0|PR.PS-01,GDPR|32.1.b,GDPR|32.4,HIPAA|164.306(a)(1),HIPAA|164.312(a)(1),HIPAA|164.312(a)(2)(i),HIPAA|164.312(d),ISO-27001-2022|A.5.1,ISO-27001-2022|A.5.2,ISO-27001-2022|A.5.3,ISO-27001-2022|A.5.4,ISO-27001-2022|A.5.10,ISO-27001-2022|A.5.15,ISO-27001-2022|A.5.16,ISO-27001-2022|A.5.17,ISO-27001-2022|A.5.31,ISO-27001-2022|A.5.33,ISO-27001-2022|A.5.36,ISO-27001-2022|A.5.37,ISO-27001-2022|A.7.7,ISO-27001-2022|A.7.10,ISO-27001-2022|A.8.2,ISO-27001-2022|A.8.3,ISO-27001-2022|A.8.9,ISO-27001-2022|A.8.18,ISO-27001-2022|A.8.20,ISO-27001-2022|5.2,ISO-27001-2022|5.3,ISO-27001-2022|7.5.1,ISO-27001-2022|7.5.2,ISO-27001-2022|7.5.3,ISO/IEC-27001|A.6.1.2,ISO/IEC-27001|A.9.4.1,ISO/IEC-27001|A.9.4.5,ITSG-33|AC-3,ITSG-33|AC-5,ITSG-33|AC-6,ITSG-33|CM-1,ITSG-33|CM-2,ITSG-33|CM-6,ITSG-33|CM-7,ITSG-33|IA-5,ITSG-33|MP-2,ITSG-33|MP-2a.,LEVEL|1A,NESA|M1.2.2,NESA|T1.3.2,NESA|T1.3.3,NESA|T1.4.1,NESA|T3.2.5,NESA|T4.2.1,NESA|T5.1.1,NESA|T5.2.2,NESA|T5.2.3,NESA|T5.4.1,NESA|T5.4.4,NESA|T5.4.5,NESA|T5.5.4,NESA|T5.6.1,NESA|T7.5.1,NESA|T7.5.2,NESA|T7.5.3,NIAv2|AM1,NIAv2|AM3,NIAv2|AM23f,NIAv2|GS8b,NIAv2|SS13c,NIAv2|SS15a,NIAv2|SS15c,NIAv2|SS16,NIAv2|SS29,NIAv2|VL7a,NIAv2|VL7b,PCI-DSSv3.2.1|2.2.2,PCI-DSSv3.2.1|7.1.2,PCI-DSSv4.0|7.2.1,PCI-DSSv4.0|7.2.2,QCSC-v1|3.2,QCSC-v1|5.2.1,QCSC-v1|5.2.2,QCSC-v1|6.2,QCSC-v1|7.2,QCSC-v1|13.2,SWIFT-CSCv1|2.3,SWIFT-CSCv1|5.1,TBA-FIISB|31.1,TBA-FIISB|31.4.2,TBA-FIISB|31.4.3"
+"Check Name: 4.3.1 Ensure nftables base chains exist
+
+Information: Chains are containers for rules. They exist in two kinds, base chains and regular chains. A base chain is an entry point for packets from the networking stack, a regular chain may be used as jump target and is used for better rule organization.
+
+Note: - IF - Firewalld is in use, this recommendation can be skipped.
+
+If a base chain doesn't exist with a hook for input, forward, and delete, packets that would flow through those chains will not be touched by nftables.
+
+Result: FAILED
+
+Actual Value: All of the following must pass to satisfy this requirement:
+
+-------------------------
+FAILED - hook output
+The command '/sbin/nft -n list ruleset | /bin/grep 'hook output'' did not return any result
+
+-------------------------
+FAILED - hook input
+The command '/sbin/nft -n list ruleset | /bin/grep 'hook input'' did not return any result
+
+-------------------------
+FAILED - hook forward
+The command '/sbin/nft -n list ruleset | /bin/grep 'hook forward'' did not return any result
+
+Policy Value: FAILED
+
+Solution: - IF - NFTables utility is in use on your system:
+
+Run the following command to create the base chains:
+
+# nft create chain inet <table name> <base chain name> { type filter hook <(input|forward|output)> priority 0 \; }
+
+Example:
+
+# nft create chain inet filter input { type filter hook input priority 0 \; }
+# nft create chain inet filter forward { type filter hook forward priority 0 \; }
+# nft create chain inet filter output { type filter hook output priority 0 \; }
+
+Note: use the add command if the create command returns an error due to the chain already existing.
+
+Impact:
+
+If configuring over ssh, creating a base chain with a policy of drop will cause loss of connectivity.
+
+Ensure that a rule allowing ssh has been added to the base chain prior to setting the base chain's policy to drop
+
+See Also: https://workbench.cisecurity.org/benchmarks/18210
+
+Reference Information: 800-171|3.13.1,800-171|3.13.5,800-171|3.13.6,800-171r3|03.13.01,800-171r3|03.13.06,800-53|CA-9,800-53|SC-7,800-53|SC-7(5),800-53r5|CA-9,CN-L3|7.1.2.2(c),CN-L3|8.1.10.6(j),CSCv7|9.4,CSCv8|4.4,CSF|DE.CM-1,CSF|ID.AM-3,CSF|PR.AC-5,CSF|PR.DS-5,CSF|PR.PT-4,CSF2.0|DE.CM-01,CSF2.0|ID.AM-03,CSF2.0|PR.DS-01,CSF2.0|PR.DS-02,CSF2.0|PR.DS-10,CSF2.0|PR.IR-01,GDPR|32.1.b,GDPR|32.1.d,GDPR|32.2,HIPAA|164.306(a)(1),ISO-27001-2022|A.5.14,ISO-27001-2022|A.8.16,ISO-27001-2022|A.8.20,ISO/IEC-27001|A.13.1.3,ITSG-33|SC-7,ITSG-33|SC-7(5),LEVEL|1A,NESA|T4.5.4,NIAv2|GS1,NIAv2|GS2a,NIAv2|GS2b,NIAv2|GS7b,NIAv2|NS25,PCI-DSSv3.2.1|1.1,PCI-DSSv3.2.1|1.2,PCI-DSSv3.2.1|1.2.1,PCI-DSSv3.2.1|1.3,PCI-DSSv4.0|1.2.1,PCI-DSSv4.0|1.4.1,QCSC-v1|4.2,QCSC-v1|5.2.1,QCSC-v1|5.2.2,QCSC-v1|5.2.3,QCSC-v1|6.2,QCSC-v1|8.2.1,SWIFT-CSCv1|2.1,TBA-FIISB|43.1"
+"Check Name: 4.3.2 Ensure nftables established connections are configured
+
+Information: Configure the firewall rules for new outbound and established connections
+
+Note: - IF - Firewalld is in use, this recommendation can be skipped.
+
+If rules are not in place for established connections, all packets will be dropped by the default policy preventing network usage.
+
+Result: FAILED
+
+Actual Value: All of the following must pass to satisfy this requirement:
+
+-------------------------
+FAILED - nft list ruleset hook input udp ct state
+The command '/sbin/nft list ruleset | /bin/awk '/hook input/,/}/' | /bin/grep 'ct state'' did not return any result
+
+-------------------------
+FAILED - nft list ruleset hook input tcp ct state
+The command '/sbin/nft list ruleset | /bin/awk '/hook input/,/}/' | /bin/grep 'ct state'' did not return any result
+
+-------------------------
+FAILED - nft list ruleset hook input icmp ct state
+The command '/sbin/nft list ruleset | /bin/awk '/hook input/,/}/' | /bin/grep 'ct state'' did not return any result
+
+Policy Value: FAILED
+
+Solution: - IF - NFTables utility is in use on your system:
+
+Configure nftables in accordance with site policy. The following commands will implement a policy to allow all established connections:
+
+# systemctl is-enabled nftables.service | grep -q 'enabled' && nft add rule inet filter input ip protocol tcp ct state established accept
+# systemctl is-enabled nftables.service | grep -q 'enabled' && nft add rule inet filter input ip protocol udp ct state established accept
+# systemctl is-enabled nftables.service | grep -q 'enabled' && nft add rule inet filter input ip protocol icmp ct state established accept
+
+See Also: https://workbench.cisecurity.org/benchmarks/18210
+
+Reference Information: 800-171|3.13.1,800-171|3.13.5,800-171|3.13.6,800-171r3|03.13.01,800-171r3|03.13.06,800-53|CA-9,800-53|SC-7,800-53|SC-7(5),800-53r5|CA-9,CN-L3|7.1.2.2(c),CN-L3|8.1.10.6(j),CSCv7|9.4,CSCv8|4.4,CSF|DE.CM-1,CSF|ID.AM-3,CSF|PR.AC-5,CSF|PR.DS-5,CSF|PR.PT-4,CSF2.0|DE.CM-01,CSF2.0|ID.AM-03,CSF2.0|PR.DS-01,CSF2.0|PR.DS-02,CSF2.0|PR.DS-10,CSF2.0|PR.IR-01,GDPR|32.1.b,GDPR|32.1.d,GDPR|32.2,HIPAA|164.306(a)(1),ISO-27001-2022|A.5.14,ISO-27001-2022|A.8.16,ISO-27001-2022|A.8.20,ISO/IEC-27001|A.13.1.3,ITSG-33|SC-7,ITSG-33|SC-7(5),LEVEL|1M,NESA|T4.5.4,NIAv2|GS1,NIAv2|GS2a,NIAv2|GS2b,NIAv2|GS7b,NIAv2|NS25,PCI-DSSv3.2.1|1.1,PCI-DSSv3.2.1|1.2,PCI-DSSv3.2.1|1.2.1,PCI-DSSv3.2.1|1.3,PCI-DSSv4.0|1.2.1,PCI-DSSv4.0|1.4.1,QCSC-v1|4.2,QCSC-v1|5.2.1,QCSC-v1|5.2.2,QCSC-v1|5.2.3,QCSC-v1|6.2,QCSC-v1|8.2.1,SWIFT-CSCv1|2.1,TBA-FIISB|43.1"
+"Check Name: 4.3.3 Ensure nftables default deny firewall policy
+
+Information: Base chain policy is the default verdict that will be applied to packets reaching the end of the chain.
+
+There are two policies: accept (Default) and drop. If the policy is set to accept, the firewall will accept any packet that is not configured to be denied and the packet will continue traversing the network stack.
+
+It is easier to explicitly permit acceptable usage than to deny unacceptable usage.
+
+Note:
+
+ - - IF - Firewalld is in use, this recommendation can be skipped.
+ - Changing firewall settings while connected over the network can result in being locked out of the system.
+
+Result: FAILED
+
+Actual Value: All of the following must pass to satisfy this requirement:
+
+-------------------------
+FAILED - nft list ruleset hook forward drop
+The command '/sbin/nft list ruleset | /bin/grep 'hook forward'' did not return any result
+
+-------------------------
+FAILED - nft list ruleset hook input drop
+The command '/sbin/nft list ruleset | /bin/grep 'hook input'' did not return any result
+
+Policy Value: FAILED
+
+Solution: - IF - NFTables utility is in use on your system:
+
+Run the following command for the base chains with the input, forward, and output hooks to implement a default DROP policy:
+
+# nft chain <table family> <table name> <chain name> { policy drop \; }
+
+Example:
+
+# nft chain inet filter input { policy drop \; }
+# nft chain inet filter forward { policy drop \; }
+
+Impact:
+
+If configuring nftables over ssh, creating a base chain with a policy of drop will cause loss of connectivity.
+
+Ensure that a rule allowing ssh has been added to the base chain prior to setting the base chain's policy to drop
+
+See Also: https://workbench.cisecurity.org/benchmarks/18210
+
+Reference Information: 800-171|3.13.1,800-171|3.13.5,800-171|3.13.6,800-171r3|03.13.01,800-171r3|03.13.06,800-53|CA-9,800-53|SC-7,800-53|SC-7(5),800-53r5|CA-9,CN-L3|7.1.2.2(c),CN-L3|8.1.10.6(j),CSCv7|9.4,CSCv8|4.4,CSF|DE.CM-1,CSF|ID.AM-3,CSF|PR.AC-5,CSF|PR.DS-5,CSF|PR.PT-4,CSF2.0|DE.CM-01,CSF2.0|ID.AM-03,CSF2.0|PR.DS-01,CSF2.0|PR.DS-02,CSF2.0|PR.DS-10,CSF2.0|PR.IR-01,GDPR|32.1.b,GDPR|32.1.d,GDPR|32.2,HIPAA|164.306(a)(1),ISO-27001-2022|A.5.14,ISO-27001-2022|A.8.16,ISO-27001-2022|A.8.20,ISO/IEC-27001|A.13.1.3,ITSG-33|SC-7,ITSG-33|SC-7(5),LEVEL|1A,NESA|T4.5.4,NIAv2|GS1,NIAv2|GS2a,NIAv2|GS2b,NIAv2|GS7b,NIAv2|NS25,PCI-DSSv3.2.1|1.1,PCI-DSSv3.2.1|1.2,PCI-DSSv3.2.1|1.2.1,PCI-DSSv3.2.1|1.3,PCI-DSSv4.0|1.2.1,PCI-DSSv4.0|1.4.1,QCSC-v1|4.2,QCSC-v1|5.2.1,QCSC-v1|5.2.2,QCSC-v1|5.2.3,QCSC-v1|6.2,QCSC-v1|8.2.1,SWIFT-CSCv1|2.1,TBA-FIISB|43.1"
