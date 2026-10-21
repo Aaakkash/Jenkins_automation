@@ -457,7 +457,76 @@
           changed_when: false
           when: "'5.3.3.4.1' in cis_custom_remediation_ids"
 
- 
+# ============================================================
+# 5.4.1.3 - Ensure password expiration warning days are configured
+# ============================================================
+
+    - name: 5.4.1.3 | Configure password expiration warning days
+      become: true
+      when: "'5.4.1.3' in cis_custom_remediation_ids"
+      block:
+        - name: 5.4.1.3 | Validate configured warning period
+          ansible.builtin.assert:
+            that:
+              - cis_password_warn_days | string is match('^[0-9]+$')
+              - cis_password_warn_days | int >= 7
+            fail_msg: >-
+              Configure cis_password_warn_days as an integer of at least 7
+              in config/cis_unix_team_inputs.yml.
+
+        - name: 5.4.1.3 | Read current default warning period
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/awk
+              - '$1 == "PASS_WARN_AGE" {value=$2} END {print value}'
+              - /etc/login.defs
+          register: cis_password_warn_default
+          changed_when: false
+
+        - name: 5.4.1.3 | Configure default warning period
+          ansible.builtin.lineinfile:
+            path: /etc/login.defs
+            regexp: '^[ \t]*PASS_WARN_AGE[ \t]+'
+            line: "PASS_WARN_AGE {{ cis_password_warn_days | int }}"
+            owner: root
+            group: root
+            backup: true
+          when: >-
+            not (
+              cis_password_warn_default.stdout | trim
+              is match('^[0-9]+$')
+            )
+            or
+            (cis_password_warn_default.stdout | trim | int)
+            < (cis_password_warn_days | int)
+
+        - name: 5.4.1.3 | Identify existing users needing remediation
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/awk
+              - -F:
+              - -v
+              - "minimum={{ cis_password_warn_days | int }}"
+              - |
+                $2 ~ /^\$.+\$/ {
+                  if ($6 == "" || $6 + 0 < minimum)
+                    print $1
+                }
+              - /etc/shadow
+          register: cis_password_warning_users
+          changed_when: false
+
+        - name: 5.4.1.3 | Update warning period for non-compliant users
+          ansible.builtin.command:
+            argv:
+              - /usr/bin/chage
+              - --warndays
+              - "{{ cis_password_warn_days | int | string }}"
+              - "{{ item }}"
+          loop: "{{ cis_password_warning_users.stdout_lines }}"
+          loop_control:
+            label: "{{ item }}"
+          changed_when: true
 
     # ============================================================
     # 6.1.2 - AIDE scheduled integrity check
@@ -1384,31 +1453,19 @@
             /usr/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512'
           backup: true
           validate: /usr/sbin/aide --config %s --config-check
-    - name: 7.2.9 | Restrict interactive user dot files
-      ansible.builtin.shell: "python3 - <<'PYDOT'\nimport os,pwd,json,stat\nselected=json.loads(os.environ['CIS_DOT_USERS'])\n\
-        uid_min=1000\nwith open('/etc/login.defs') as f:\n    for line in f:\n        fields=line.split()\n        if\
-        \ len(fields)>1 and fields[0]=='UID_MIN': uid_min=int(fields[1])\nusers=[pwd.getpwnam(x) for x in selected]\
-        \ if selected else [p for p in pwd.getpwall() if p.pw_uid>=uid_min and not p.pw_shell.endswith(('nologin','false'))]\n\
-        for user in users:\n    home=user.pw_dir\n    if not os.path.isdir(home): continue\n    if home=='/' or os.path.islink(home):\
-        \ raise RuntimeError('Unsafe home directory for '+user.pw_name)\n    for name in ('.forward','.rhosts'):\n \
-        \       source=os.path.join(home,name)\n        if os.path.lexists(source):\n            dest=source+'.cis-disabled'\n\
-        \            if os.path.lexists(dest): raise RuntimeError('Existing quarantine path: '+dest)\n            os.rename(source,dest)\n\
-        \            print('renamed '+source+' -> '+dest)\n    with os.scandir(home) as entries:\n        for entry\
-        \ in entries:\n            if not entry.name.startswith('.') or not entry.is_file(follow_symlinks=False): continue\n\
-        \            before=entry.stat(follow_symlinks=False)\n            if before.st_uid!=user.pw_uid:\n        \
-        \        os.chown(entry.path,user.pw_uid,-1,follow_symlinks=False)\n                print('owner '+entry.path+'\
-        \ -> '+user.pw_name)\n            allowed=0o600 if entry.name in ('.netrc','.bash_history') else 0o644\n   \
-        \         mode=stat.S_IMODE(before.st_mode)&allowed\n            if mode!=stat.S_IMODE(before.st_mode):\n  \
-        \              os.chmod(entry.path,mode,follow_symlinks=False)\n                print('mode '+entry.path+' ->\
-        \ '+format(mode,'04o'))\nPYDOT"
+
+    - name: 7.2.9 | Remediate recursive interactive-user dotfile access
       become: true
+      when: "'7.2.9' in cis_custom_remediation_ids"
+      ansible.builtin.shell: |
+        python3 - remediate <<'CIS_DOTFILES_SCRIPT'
+        {{ lookup('ansible.builtin.file', role_path ~ '/files/cis_dotfiles_access.py') }}
+        CIS_DOTFILES_SCRIPT
       args:
         executable: /bin/bash
-      environment:
-        CIS_DOT_USERS: '{{ cis_local_interactive_users | default([]) | to_json }}'
-      register: cis_extra_dot_changes
-      changed_when: cis_extra_dot_changes.stdout | trim | length > 0
-      when: '''7.2.9'' in cis_custom_remediation_ids'
+      register: cis_dotfile_remediation
+      changed_when: "'CHANGED:' in cis_dotfile_remediation.stdout"
+      
     - name: 5.3.3.2.1 | Configure difok
       when: '''5.3.3.2.1'' in cis_custom_remediation_ids'
       become: true
