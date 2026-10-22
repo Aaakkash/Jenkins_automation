@@ -1,13 +1,25 @@
 ---
- 
 - name: Load mandatory site-policy configuration
   ansible.builtin.include_vars:
-    file: "{{ cis_site_policy_file }}"
-  tags: [always]
+    file: '{{ cis_site_policy_file }}'
+  tags:
+  - always
+
+- name: Diagnose loaded test configuration
+  ansible.builtin.debug:
+    msg:
+      policy_file: "{{ cis_site_policy_file }}"
+      requested_ids: "{{ cis_requested_control_ids | default([]) }}"
+      requested_ids_type: >-
+        {{ cis_requested_control_ids | default([]) | type_debug }}
+      firewall_backend: "{{ cis_firewall_backend | default('UNDEFINED') }}"
+      reboot_allowed: "{{ cis_reboot_allowed | default(false) }}"
+  tags:
+    - always
 
 - name: Normalize journal rotation values from the single site-policy file
   ansible.builtin.set_fact:
-    cis_journald_rotation: >-
+    cis_journald_rotation: |-
       {{ cis_journald_rotation | default({
           'SystemMaxUse': cis_journald_system_max_use | default(''),
           'SystemKeepFree': cis_journald_system_keep_free | default(''),
@@ -15,58 +27,55 @@
           'RuntimeKeepFree': cis_journald_runtime_keep_free | default(''),
           'MaxFileSec': cis_journald_max_file_sec | default('')
       }) }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Expose normalized rotation values to existing validator environment
   ansible.builtin.set_fact:
-    cis_journald_system_max_use: "{{ cis_journald_rotation.get('SystemMaxUse', '') }}"
-    cis_journald_system_keep_free: "{{ cis_journald_rotation.get('SystemKeepFree', '') }}"
-    cis_journald_runtime_max_use: "{{ cis_journald_rotation.get('RuntimeMaxUse', '') }}"
-    cis_journald_runtime_keep_free: "{{ cis_journald_rotation.get('RuntimeKeepFree', '') }}"
-    cis_journald_max_file_sec: "{{ cis_journald_rotation.get('MaxFileSec', '') }}"
-  tags: [always]
-
+    cis_journald_system_max_use: '{{ cis_journald_rotation.get(''SystemMaxUse'', '''') }}'
+    cis_journald_system_keep_free: '{{ cis_journald_rotation.get(''SystemKeepFree'', '''') }}'
+    cis_journald_runtime_max_use: '{{ cis_journald_rotation.get(''RuntimeMaxUse'', '''') }}'
+    cis_journald_runtime_keep_free: '{{ cis_journald_rotation.get(''RuntimeKeepFree'', '''') }}'
+    cis_journald_max_file_sec: '{{ cis_journald_rotation.get(''MaxFileSec'', '''') }}'
+  tags:
+  - always
 - name: Validate standardized CIS role input
   ansible.builtin.assert:
     that:
-      - cis_operation in ['validate', 'remediate']
-      - cis_phase | string in ['all', '01', '02', '03', '04', '05', '06', '07']
-      - cis_ipv6_policy in ['review', 'enabled', 'disabled']
-      - cis_firewall_backend in ['review', 'disabled', 'firewalld', 'nftables']
-      - cis_logging_backend in ['review', 'journald', 'rsyslog']
-      - ansible_facts.distribution == 'RedHat'
-      - ansible_facts.distribution_major_version == '9'
-    fail_msg: >-
-      Use cis_operation=validate|remediate, cis_phase=all|01-07,
-      cis_ipv6_policy=review|enabled|disabled,
-      cis_firewall_backend=review|disabled|firewalld|nftables,
+    - cis_operation in ['validate', 'remediate']
+    - cis_phase | string in ['all', '01', '02', '03', '04', '05', '06', '07']
+    - cis_ipv6_policy in ['review', 'enabled', 'disabled']
+    - cis_firewall_backend in ['review', 'disabled', 'firewalld', 'nftables']
+    - cis_logging_backend in ['review', 'journald', 'rsyslog']
+    - ansible_facts.distribution == 'RedHat'
+    - ansible_facts.distribution_major_version == '9'
+    fail_msg: Use cis_operation=validate|remediate, cis_phase=all|01-07, cis_ipv6_policy=review|enabled|disabled, cis_firewall_backend=review|disabled|firewalld|nftables,
       cis_logging_backend=review|journald|rsyslog, and target RHEL 9.
-  tags: [always]
-
+  tags:
+  - always
 - name: Load validation definitions
   ansible.builtin.include_vars:
-    file: "{{ role_path }}/vars/validators.yml"
+    file: '{{ role_path }}/vars/validators.yml'
     name: cis_validator_catalog
-  tags: [always]
-
+  tags:
+  - always
 - name: Load collection rule capabilities
   ansible.builtin.include_vars:
-    file: "{{ role_path }}/vars/disable_all.yml"
+    file: '{{ role_path }}/vars/disable_all.yml'
     name: cis_collection_rule_defaults
-  tags: [always]
-
+  tags:
+  - always
 - name: Read supplied checkpoint inventory
   community.general.read_csv:
-    path: "{{ role_path }}/files/checkpoints.csv"
+    path: '{{ role_path }}/files/checkpoints.csv'
   register: cis_checkpoint_inventory
   delegate_to: localhost
   become: false
   run_once: true
-  tags: [always]
-
+  tags:
+  - always
 - name: Build normalized checkpoint control ID list
   ansible.builtin.set_fact:
-    cis_checkpoint_control_ids: >-
+    cis_checkpoint_control_ids: |-
       {{
         cis_checkpoint_inventory.list
         | map(attribute='rule')
@@ -74,11 +83,11 @@
         | map('trim')
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Normalize configured exclusion control IDs
   ansible.builtin.set_fact:
-    cis_excluded_control_ids_normalized: >-
+    cis_excluded_control_ids_normalized: |-
       {{
         cis_excluded_control_ids
         | default([])
@@ -87,120 +96,112 @@
         | unique
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Identify exclusions not present in checkpoint inventory
   ansible.builtin.set_fact:
-    cis_unknown_excluded_control_ids: >-
+    cis_unknown_excluded_control_ids: |-
       {{
         cis_excluded_control_ids_normalized
         | difference(cis_checkpoint_control_ids)
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Report exclusions not present in checkpoint inventory
   ansible.builtin.debug:
-    msg: >-
-      These excluded control IDs are not present in files/checkpoints.csv
-      and therefore are already outside this role's scope:
-      {{ cis_unknown_excluded_control_ids | join(', ') }}
+    msg: 'These excluded control IDs are not present in files/checkpoints.csv and therefore are already outside this
+      role''s scope: {{ cis_unknown_excluded_control_ids | join('', '') }}'
   when: cis_unknown_excluded_control_ids | length > 0
-  tags: [always]
-
+  tags:
+  - always
 - name: Build effective exclusion list
   ansible.builtin.set_fact:
-    cis_effective_excluded_control_ids: >-
+    cis_effective_excluded_control_ids: |-
       {{
         cis_excluded_control_ids_normalized
         | intersect(cis_checkpoint_control_ids)
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Initialize selected checkpoint list
   ansible.builtin.set_fact:
     cis_selected_checkpoints: []
     cis_remediation_capable_ids: []
     cis_custom_supported_ids:
-      - '1.1.1.9'
-      - '1.3.1.2'
-      - '1.4.1'
-      - '1.4.2'
-      - '2.4.1.8'
-      - '3.1.1'
-      - '4.1.1'
-      - '4.3.1'
-      - '4.3.2'
-      - '4.3.3'
-      - '5.1.9'
-      - '5.3.1.3'
-      - '5.3.2.1'
-      - '5.3.2.2'
-      - '5.3.2.4'
-      - '5.3.3.3.3'
-      - '5.3.3.4.1'
-      - '5.4.2.5'
-      - '6.1.2'
-      - '7.1.11'
-      - '7.2.3'
-      - '1.2.1.1'
-      - '1.2.1.4'
-      - '6.2.1.2'
-      - '6.2.1.3'
-      - '6.2.2.1.2'
-      - '6.2.3.8'
-      - '5.1.8'
-      - '6.2.3.5'
-      - '6.2.3.6'
-      - '6.2.4.1'
-      - '7.1.13'
-      - '1.1.2.1.4'
-      - '2.4.1.7'
-      - '5.3.3.2.7'
-      - '5.3.3.3.2'
-      - '6.1.3'
-      - '7.2.9'
-      - '1.7.3'
-      - '5.3.3.2.1'
-      - '5.3.3.2.4'
-      - '5.3.3.2.5'
-      - '1.1.2.1.4'
-    cis_effective_run_id: >-
-      {{ cis_run_id if cis_run_id | length > 0 else ansible_date_time.iso8601_basic_short }}
-  tags: [always]
-
+    - 1.1.1.9
+    - 1.3.1.2
+    - 1.4.1
+    - 1.4.2
+    - 2.4.1.8
+    - 3.1.1
+    - 4.1.1
+    - 4.3.1
+    - 4.3.2
+    - 4.3.3
+    - 5.1.9
+    - 5.3.1.3
+    - 5.3.2.1
+    - 5.3.2.2
+    - 5.3.2.4
+    - 5.3.3.3.3
+    - 5.3.3.4.1
+    - 5.4.2.5
+    - 5.4.1.3
+    - 6.1.2
+    - 7.1.11
+    - 7.2.3
+    - 1.2.1.1
+    - 1.2.1.4
+    - 6.2.1.2
+    - 6.2.1.3
+    - 6.2.2.1.2
+    - 6.2.3.8
+    - 5.1.8
+    - 6.2.3.5
+    - 6.2.3.6
+    - 6.2.4.1
+    - 7.1.13
+    - 1.1.2.1.4
+    - 2.4.1.7
+    - 5.3.3.2.7
+    - 5.3.3.3.2
+    - 6.1.3
+    - 7.2.9
+    - 1.7.3
+    - 5.3.3.2.1
+    - 5.3.3.2.4
+    - 5.3.3.2.5
+    - 1.1.2.1.4
+    cis_effective_run_id: '{{ cis_run_id if cis_run_id | length > 0 else ansible_date_time.iso8601_basic_short }}'
+  tags:
+  - always
 - name: Display formally excluded CIS controls
   ansible.builtin.debug:
     msg:
-      excluded_control_ids: "{{ cis_excluded_control_ids | default([]) }}"
-      exclusion_approved_by: "{{ cis_exclusion_approved_by | default('NOT_PROVIDED') }}"
-      exclusion_reference: "{{ cis_exclusion_reference | default('NOT_PROVIDED') }}"
-      exclusion_reason: "{{ cis_exclusion_reason | default('NOT_PROVIDED') }}"
+      excluded_control_ids: '{{ cis_excluded_control_ids | default([]) }}'
+      exclusion_approved_by: '{{ cis_exclusion_approved_by | default(''NOT_PROVIDED'') }}'
+      exclusion_reference: '{{ cis_exclusion_reference | default(''NOT_PROVIDED'') }}'
+      exclusion_reason: '{{ cis_exclusion_reason | default(''NOT_PROVIDED'') }}'
   when: cis_excluded_control_ids | default([]) | length > 0
-  tags: [always]
-
+  tags:
+  - always
 - name: Select requested checkpoints excluding formally approved exclusions
   ansible.builtin.set_fact:
-    cis_selected_checkpoints: "{{ cis_selected_checkpoints + [item] }}"
-  loop: "{{ cis_checkpoint_inventory.list }}"
+    cis_selected_checkpoints: '{{ cis_selected_checkpoints + [item] }}'
+  loop: '{{ cis_checkpoint_inventory.list }}'
   loop_control:
-    label: "{{ item.rule }}"
+    label: '{{ item.rule }}'
   when:
-    - >-
-      cis_phase == 'all' or
-      item.rule.split('.')[0] == (cis_phase | int | string)
-    - >-
-      (item.rule | string | trim)
-      not in (cis_effective_excluded_control_ids | default([]))
-    - >-
-      (cis_requested_control_ids | default([]) | length == 0) or
-      ((item.rule | string | trim) in cis_requested_control_ids)
-  tags: [always]
-
+  - cis_phase == 'all' or item.rule.split('.')[0] == (cis_phase | int | string)
+  - (item.rule | string | trim) not in (cis_effective_excluded_control_ids | default([]))
+  - (cis_requested_control_ids | default([]) | length == 0) or ((item.rule | string | trim) in cis_requested_control_ids)
+  tags:
+  - always
 - name: Build selected and collection-supported control ID lists
   ansible.builtin.set_fact:
-    cis_selected_control_ids: >-
+    cis_selected_control_ids: |-
       {{
         cis_selected_checkpoints
         | map(attribute='rule')
@@ -208,7 +209,7 @@
         | map('trim')
         | list
       }}
-    cis_collection_supported_ids: >-
+    cis_collection_supported_ids: |-
       {{
         cis_collection_rule_defaults
         | dict2items
@@ -219,11 +220,11 @@
         | map('replace', '_', '.')
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Identify remediation-capable selected controls
   ansible.builtin.set_fact:
-    cis_remediation_capable_ids: >-
+    cis_remediation_capable_ids: |-
       {{
         cis_selected_control_ids
         | intersect(
@@ -236,30 +237,32 @@
           )
         | list
       }}
-  tags: [always]
+  tags:
+  - always
+
 
 - name: Run read-only pre-validation
   ansible.builtin.include_tasks: validation.yml
   vars:
     cis_validation_stage: pre
-  tags: [always]
-
+  tags:
+  - always
 - name: Save pre-validation results
   ansible.builtin.set_fact:
     cis_remediation_errors: []
-    cis_pre_validation_results: "{{ cis_validation_results }}"
-    cis_noncompliant_ids: >-
+    cis_pre_validation_results: '{{ cis_validation_results }}'
+    cis_noncompliant_ids: |-
       {{
         cis_validation_results
         | selectattr('status', 'equalto', 'NON_COMPLIANT')
         | map(attribute='control_id')
         | list
       }}
-  tags: [always]
-
+  tags:
+  - always
 - name: Select non-compliant controls supported for automatic remediation
   ansible.builtin.set_fact:
-    cis_remediation_ids: >-
+    cis_remediation_ids: |-
       {{
         cis_noncompliant_ids
         | intersect(cis_remediation_capable_ids)
@@ -281,7 +284,7 @@
           )
         | list
       }}
-    cis_collection_remediation_ids: >-
+    cis_collection_remediation_ids: |-
       {{
         cis_noncompliant_ids
         | intersect(cis_remediation_capable_ids)
@@ -294,7 +297,7 @@
           )
         | list
       }}
-    cis_custom_remediation_ids: >-
+    cis_custom_remediation_ids: |-
       {{
         cis_noncompliant_ids
         | intersect(cis_custom_supported_ids)
@@ -311,118 +314,107 @@
           )
         | list
       }}
-  tags: [always]
+  tags:
+  - always
 
 - name: Display selected remediation controls
   ansible.builtin.debug:
     msg:
-      all_remediation_ids: "{{ cis_remediation_ids }}"
-      collection_remediation_ids: "{{ cis_collection_remediation_ids }}"
-      custom_remediation_ids: "{{ cis_custom_remediation_ids }}"
-      remediation_skipped_by_policy: >-
+      all_remediation_ids: '{{ cis_remediation_ids }}'
+      collection_remediation_ids: '{{ cis_collection_remediation_ids }}'
+      custom_remediation_ids: '{{ cis_custom_remediation_ids }}'
+      remediation_skipped_by_policy: |-
         {{
           cis_noncompliant_ids
           | intersect(cis_remediation_skip_ids | default([]))
           | list
         }}
   when: cis_operation == 'remediate'
-  tags: [always]
-
+  tags:
+  - always
 - name: Emit pre-validation report payload
   ansible.builtin.debug:
     msg:
       cis_report_payload:
         stage: pre
-        operation: "{{ cis_operation }}"
-        host: "{{ inventory_hostname }}"
-        results: "{{ cis_pre_validation_results }}"
+        operation: '{{ cis_operation }}'
+        host: '{{ inventory_hostname }}'
+        results: '{{ cis_pre_validation_results }}'
         remediation_attempted: []
-  tags: [always]
-
+  tags:
+  - always
 - name: Run remediation workflow
   when:
-    - cis_operation == 'remediate'
-    - cis_remediation_ids | length > 0
-  tags: [always]
+  - cis_operation == 'remediate'
+  - cis_remediation_ids | length > 0
+  tags:
+  - always
+  module_defaults:
+    ansible.builtin.copy:
+      backup: true
+    ansible.builtin.template:
+      backup: true
+    ansible.builtin.lineinfile:
+      backup: true
+    ansible.builtin.blockinfile:
+      backup: true
+    ansible.builtin.replace:
+      backup: true
+    ansible.builtin.cron:
+      backup: true
   block:
-    - name: Back up major configuration before remediation
-      ansible.builtin.include_tasks: backup.yml
-
-    - name: Apply custom remediations independently
-      ansible.builtin.include_tasks: remediate_report_gaps.yml
-      loop: "{{ cis_remediation_ids | intersect(cis_custom_supported_ids) }}"
-      loop_control:
-        loop_var: cis_remediation_control_id
-        label: "{{ cis_remediation_control_id }}"
-      vars:
-        cis_custom_remediation_ids: "{{ [cis_remediation_control_id] }}"
-        cis_collection_remediation_ids: []
-
-    - name: Apply selected collection remediations in one pass
-      ansible.builtin.include_tasks: remediate_report_gaps.yml
-      vars:
-        cis_remediation_control_id: ""
-        cis_custom_remediation_ids: []
-        cis_collection_remediation_ids: >-
-          {{
-            cis_remediation_ids
-            | difference(cis_custom_supported_ids)
-          }}
-      when:
-        - >-
+  - name: Apply custom remediations independently
+    ansible.builtin.include_tasks: remediate_report_gaps.yml
+    loop: '{{ cis_remediation_ids | intersect(cis_custom_supported_ids) }}'
+    loop_control:
+      loop_var: cis_remediation_control_id
+      label: '{{ cis_remediation_control_id }}'
+    vars:
+      cis_custom_remediation_ids: '{{ [cis_remediation_control_id] }}'
+      cis_collection_remediation_ids: []
+  - name: Apply selected collection remediations in one pass
+    ansible.builtin.include_tasks: remediate_report_gaps.yml
+    vars:
+      cis_remediation_control_id: ''
+      cis_custom_remediation_ids: []
+      cis_collection_remediation_ids: |-
+        {{
           cis_remediation_ids
           | difference(cis_custom_supported_ids)
-          | length > 0
-
-    - name: Emit remediation-attempt report payload
-      ansible.builtin.debug:
-        msg:
-          cis_report_payload:
-            stage: remediation
-            operation: "{{ cis_operation }}"
-            host: "{{ inventory_hostname }}"
-            results: "{{ cis_pre_validation_results }}"
-            remediation_attempted: "{{ cis_remediation_ids }}"
-            remediation_errors: "{{ cis_remediation_errors | default([]) }}"
-
-
-
-- name: Reboot server after remediation
-  become: true
-  ansible.builtin.reboot:
-    msg: "Rebooting after CIS remediation"
-    reboot_timeout: 900
-    connect_timeout: 10
-    post_reboot_delay: 30
-    test_command: /usr/bin/true
-  when:
-    - cis_operation == 'remediate'
-    - cis_remediation_ids | default([]) | length > 0
-
-# Keep your existing re-validation tasks below this point.
-
+        }}
+    when:
+    - cis_remediation_ids | difference(cis_custom_supported_ids) | length > 0
+  - name: Emit remediation-attempt report payload
+    ansible.builtin.debug:
+      msg:
+        cis_report_payload:
+          stage: remediation
+          operation: '{{ cis_operation }}'
+          host: '{{ inventory_hostname }}'
+          results: '{{ cis_pre_validation_results }}'
+          remediation_attempted: '{{ cis_remediation_ids }}'
+          remediation_errors: '{{ cis_remediation_errors | default([]) }}'
 - name: Run read-only post-validation
   ansible.builtin.include_tasks: validation.yml
   vars:
     cis_validation_stage: post
-    cis_selected_checkpoints: >-
+    cis_selected_checkpoints: |-
       {{
         cis_checkpoint_inventory.list
         | selectattr('rule', 'in', cis_remediation_ids)
         | list
       }}
   when: cis_operation == 'remediate'
-  tags: [always]
-
+  tags:
+  - always
 - name: Save post-validation results
   ansible.builtin.set_fact:
-    cis_post_validation_results: >-
-      {{ cis_validation_results if cis_operation == 'remediate' else [] }}
-  tags: [always]
-
+    cis_post_validation_results: '{{ cis_validation_results if cis_operation == ''remediate'' else [] }}'
+  tags:
+  - always
 - name: Identify unresolved post-remediation controls
   ansible.builtin.set_fact:
-    cis_unresolved_post_results: >-
+    cis_unresolved_post_results: |-
       {{ cis_post_validation_results
          | rejectattr('status', 'equalto', 'COMPLIANT')
          | rejectattr(
@@ -432,43 +424,41 @@
            )
          | list }}
   when: cis_operation == 'remediate'
-  tags: [always]
-
+  tags:
+  - always
 - name: RHEL9_CIS_REPORT_FINAL | Emit final structured results
   ansible.builtin.debug:
     msg:
       cis_report_payload:
         stage: final
-        operation: "{{ cis_operation }}"
-        host: "{{ inventory_hostname }}"
-        results: "{{ cis_pre_validation_results }}"
-        post_results: "{{ cis_post_validation_results }}"
-        remediation_attempted: >-
-          {{ cis_remediation_ids if cis_operation == 'remediate' else [] }}
-        remediation_skipped_by_policy: >-
+        operation: '{{ cis_operation }}'
+        host: '{{ inventory_hostname }}'
+        results: '{{ cis_pre_validation_results }}'
+        post_results: '{{ cis_post_validation_results }}'
+        remediation_attempted: '{{ cis_remediation_ids if cis_operation == ''remediate'' else [] }}'
+        remediation_skipped_by_policy: |-
           {{
             cis_noncompliant_ids
             | intersect(cis_remediation_skip_ids | default([]))
             | list
           }}
-        excluded_control_ids: "{{ cis_excluded_control_ids | default([]) }}"
-        exclusion_approved_by: >-
-          {{ cis_exclusion_approved_by | default('NOT_PROVIDED') }}
-        exclusion_reference: >-
-          {{ cis_exclusion_reference | default('NOT_PROVIDED') }}
-        exclusion_reason: >-
-          {{ cis_exclusion_reason | default('NOT_PROVIDED') }}
-  tags: [always]
-
+        excluded_control_ids: '{{ cis_excluded_control_ids | default([]) }}'
+        exclusion_approved_by: '{{ cis_exclusion_approved_by | default(''NOT_PROVIDED'') }}'
+        exclusion_reference: '{{ cis_exclusion_reference | default(''NOT_PROVIDED'') }}'
+        exclusion_reason: '{{ cis_exclusion_reason | default(''NOT_PROVIDED'') }}'
+        remediation_errors: '{{ cis_remediation_errors | default([]) }}'
+  tags:
+  - always
 - name: Fail remediation run when in-scope controls remain unresolved
   ansible.builtin.assert:
     that:
-      - cis_unresolved_post_results | length == 0
-    fail_msg: >-
-      CIS remediation completed, but the following in-scope controls still do
-      not return validator RC 0: {{ cis_unresolved_post_results | map(attribute='control_id') | list }}.
-      Review the generated CSV evidence before the next run.
+    - cis_unresolved_post_results | length == 0
+    fail_msg: 'CIS remediation completed, but the following in-scope controls still do not return validator RC 0: {{
+      cis_unresolved_post_results | map(attribute=''control_id'') | list }}. Review the generated CSV evidence before
+      the next run.'
   when:
-    - cis_operation == 'remediate'
-    - cis_fail_remediation_when_unresolved | bool
-  tags: [always] 
+  - cis_operation == 'remediate'
+  - cis_fail_remediation_when_unresolved | bool
+  tags:
+  - always
+ 
