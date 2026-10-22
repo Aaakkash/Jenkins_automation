@@ -220,7 +220,7 @@
       when: cis_sshd_client_alive_change.changed
   - name: Configure authselect and PAM controls
     when:
-    - cis_custom_remediation_ids | intersect([ '5.3.2.1', '5.3.2.2', '5.3.2.4', '5.3.3.3.3', '5.3.3.4.1' ]) | length
+    - cis_custom_remediation_ids | intersect([ '5.3.2.1', '5.3.2.2', '5.3.2.4', '5.3.3.3.3' ]) | length
       > 0
     become: true
     block:
@@ -362,27 +362,6 @@
       loop: '{{ cis_authselect_pam_templates.results }}'
       loop_control:
         label: '{{ item.item }}'
-    - name: 5.3.3.4.1 | Remove literal nullok from custom PAM templates
-      ansible.builtin.replace:
-        path: /etc/authselect/custom/{{ cis_authselect_custom_profile }}/{{ item }}
-        regexp: (?m)^([ \t]*(?:auth|account|password|session)[ \t]+(?:requisite|required|sufficient)[ \t]+pam_unix\.so[^\n\r#]*?)[
-          \t]+nullok\b
-        replace: \g<1>
-        backup: true
-      loop:
-      - system-auth
-      - password-auth
-      when: '''5.3.3.4.1'' in cis_custom_remediation_ids'
-    - name: 5.3.3.4.1 | Remove conditional nullok from custom PAM templates
-      ansible.builtin.replace:
-        path: /etc/authselect/custom/{{ cis_authselect_custom_profile }}/{{ item }}
-        regexp: '[ \t]*\{if not "without-nullok":nullok\}'
-        replace: ''
-        backup: true
-      loop:
-      - system-auth
-      - password-auth
-      when: '''5.3.3.4.1'' in cis_custom_remediation_ids'
     - name: 5.3.2.1 | Preview custom profile before selection
       ansible.builtin.command:
         argv: '{{ [''authselect'', ''test'', ''custom/'' ~ cis_authselect_custom_profile] + cis_authselect_effective_features
@@ -409,20 +388,6 @@
         - check
       register: cis_authselect_check
       changed_when: false
-    - name: 5.3.3.4.1 | Confirm nullok is absent from generated PAM files
-      ansible.builtin.shell: |
-        if grep -Pq \
-          '^[^#\n]*pam_unix\.so[^\n]*\bnullok\b' \
-          /etc/pam.d/system-auth \
-          /etc/pam.d/password-auth; then
-          echo 'nullok remains in the generated PAM configuration'
-          exit 1
-        fi
-        echo 'nullok is absent from the generated PAM configuration'
-      args:
-        executable: /bin/bash
-      changed_when: false
-      when: '''5.3.3.4.1'' in cis_custom_remediation_ids'
     - name: 5.3.2.1 | Confirm Winbind PAM modules remain present
       ansible.builtin.command:
         argv:
@@ -440,6 +405,121 @@
         - /usr/sbin/sshd
         - -t
       changed_when: false
+      # ============================================================
+    # 5.3.3.4.1 - Ensure pam_unix does not include nullok
+    # ============================================================
+
+  - name: 5.3.3.4.1 | Manage nullok through authselect
+    become: true
+    when: "'5.3.3.4.1' in cis_custom_remediation_ids"
+    block:
+      - name: 5.3.3.4.1 | Require valid authselect configuration
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - check
+        changed_when: false
+
+      - name: 5.3.3.4.1 | Read active profile and features
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - current
+            - --raw
+        register: cis_nullok_selection
+        changed_when: false
+
+      - name: 5.3.3.4.1 | Require an active profile
+        ansible.builtin.assert:
+          that:
+            - cis_nullok_selection.stdout.split() | length > 0
+          fail_msg: No active authselect profile was detected.
+
+      - name: 5.3.3.4.1 | Read supported profile features
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - list-features
+            - "{{ cis_nullok_selection.stdout.split()[0] }}"
+        register: cis_nullok_supported_features
+        changed_when: false
+
+      - name: 5.3.3.4.1 | Require without-nullok feature support
+        ansible.builtin.assert:
+          that:
+            - "'without-nullok' in cis_nullok_supported_features.stdout.split()"
+          fail_msg: >-
+            The active profile does not support without-nullok.
+            No direct PAM-file modification will be attempted.
+
+      - name: 5.3.3.4.1 | Enable without-nullok with authselect backup
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - enable-feature
+            - without-nullok
+            - -b
+        when: >-
+          'without-nullok'
+          not in cis_nullok_selection.stdout.split()[1:]
+        changed_when: true
+
+      - name: 5.3.3.4.1 | Verify authselect integrity after remediation
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - check
+        changed_when: false
+
+      - name: 5.3.3.4.1 | Read resulting profile and features
+        ansible.builtin.command:
+          argv:
+            - authselect
+            - current
+            - --raw
+        register: cis_nullok_selection_after
+        changed_when: false
+
+      - name: 5.3.3.4.1 | Verify profile and existing features were preserved
+        ansible.builtin.assert:
+          that:
+            - >-
+              cis_nullok_selection_after.stdout.split()[0]
+              == cis_nullok_selection.stdout.split()[0]
+            - >-
+              cis_nullok_selection.stdout.split()[1:]
+              | difference(
+                  cis_nullok_selection_after.stdout.split()[1:]
+                )
+              | length == 0
+            - >-
+              'without-nullok'
+              in cis_nullok_selection_after.stdout.split()[1:]
+          fail_msg: Profile or feature preservation verification failed.
+
+      - name: 5.3.3.4.1 | Check generated PAM files for active nullok
+        ansible.builtin.command:
+          argv:
+            - /usr/bin/grep
+            - -Pn
+            - '^[ \t]*[^# \t][^#\r\n]*pam_unix\.so[^#\r\n]*\bnullok\b'
+            - /etc/pam.d/system-auth
+            - /etc/pam.d/password-auth
+        register: cis_nullok_remaining
+        changed_when: false
+        failed_when: cis_nullok_remaining.rc not in [0, 1]
+
+      - name: 5.3.3.4.1 | Require nullok to be absent
+        ansible.builtin.assert:
+          that:
+            - cis_nullok_remaining.rc == 1
+          fail_msg: >-
+            nullok remains in the generated PAM files:
+            {{ cis_nullok_remaining.stdout }}
+          success_msg: >-
+            without-nullok is enabled, the original profile/features
+            are preserved, and generated PAM files contain no active nullok.
+            
   - name: 5.4.1.3 | Configure password expiration warning days
     become: true
     when: '''5.4.1.3'' in cis_custom_remediation_ids'
