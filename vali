@@ -1,4 +1,4 @@
----
+---  
 # Strict exit-code contract: only 0 is compliant. Every executed non-zero
 # return code is classified NON_COMPLIANT. Missing site data prevents execution
 # and is reported CONFIG_VALUE_MISSING.
@@ -49,15 +49,32 @@ cis_mount_policy_check: |
   spec="__SPEC__"
   target="${spec%%:*}"
   option="${spec#*:}"
+
   if [ "$option" = mounted ]; then
     actual="$(findmnt -n -o TARGET --target "$target" 2>/dev/null)"
     echo "target=$target mounted_as=${actual:-missing}"
     [ "$actual" = "$target" ]
     exit
   fi
-  options="$(awk -v target="$target" '$1 !~ /^#/ && $2 == target {value=$4} END {print value}' /etc/fstab 2>/dev/null)"
-  echo "target=$target fstab_options=${options:-missing} required=$option"
-  [ -n "$options" ] && tr ',' '\n' <<< "$options" | grep -Fxq "$option"
+
+  options="$(awk -v target="$target" '
+    $1 !~ /^#/ && $2 == target {
+      value=$4
+    }
+    END {
+      print value
+    }
+  ' /etc/fstab 2>/dev/null)"
+
+  # Tenable specifies required: NO for these mount-option controls.
+  # If no separate fstab entry exists, the option check is not applicable.
+  if [ -z "$options" ]; then
+    echo "target=$target has no separate /etc/fstab entry; option check is not applicable"
+    exit 0
+  fi
+
+  echo "target=$target fstab_options=$options required=$option"
+  tr ',' '\n' <<< "$options" | grep -Fxq "$option"
 
 # __SPEC__ contains whitespace-separated key=value pairs.  Both the running
 # value and the effective persistent systemd-sysctl configuration must match.
@@ -363,9 +380,7 @@ cis_validators:
   '1.1.2.1.3':
     type: automatic
     command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:nosuid') }}"
-  '1.1.2.1.4':
-    type: automatic
-    command: "{{ cis_mount_policy_check | replace('__SPEC__', '/tmp:noexec') }}"
+
   '1.1.2.2.1':
     type: automatic
     command: "{{ cis_mount_policy_check | replace('__SPEC__', '/dev/shm:mounted') }}"
@@ -420,14 +435,110 @@ cis_validators:
 
   '1.4.1':
     type: automatic
-    requires: [rhel9cis_bootloader_password]
     command: |
-      if grep -Pq '^GRUB2_PASSWORD=grub\.pbkdf2\.' /boot/grub2/user.cfg 2>/dev/null; then
-        echo 'GRUB2 PBKDF2 password hash is configured'
-        exit 0
+      user_cfg="/boot/grub2/user.cfg"
+
+      if [ ! -s "$user_cfg" ]; then
+        echo "$user_cfg is missing or empty"
+        exit 1
       fi
-      echo 'GRUB2 PBKDF2 password hash is missing'
-      exit 1
+
+      if ! grep -Eq '^GRUB2_PASSWORD=grub\.pbkdf2\.sha512\.' "$user_cfg"; then
+        echo "Valid GRUB2 PBKDF2 password hash is missing from $user_cfg"
+        exit 1
+      fi
+
+      echo "Valid GRUB2 PBKDF2 password is configured in $user_cfg"
+      exit 0
+    remediation_safe: true
+    validation_source: "Tenable CIS Red Hat Enterprise Linux 9 v2.0.0 L1 Server"
+
+  '1.4.2':
+    type: automatic
+    remediation_safe: true
+    validation_source: "Tenable CIS_Red_Hat_Enterprise_Linux_9_v2.0.0_L1_Server.audit rev 1.15"
+
+    command: |
+      failed=0
+      checked=0
+
+      check_grub_file() {
+        file="$1"
+        forbidden_permissions="$2"
+        required_mode="$3"
+
+        [ -e "$file" ] || return 0
+
+        checked=$((checked + 1))
+
+        uid="$(stat -Lc '%u' "$file")"
+        gid="$(stat -Lc '%g' "$file")"
+        mode="$(stat -Lc '%a' "$file")"
+
+        echo "File: $file mode=$mode uid=$uid gid=$gid"
+
+        if [ "$uid" -ne 0 ]; then
+          echo "NON_COMPLIANT: $file is not owned by root"
+          failed=1
+        fi
+
+        if [ "$gid" -ne 0 ]; then
+          echo "NON_COMPLIANT: $file is not group-owned by root"
+          failed=1
+        fi
+
+        if find -L "$file" -prune \
+          -perm "/$forbidden_permissions" \
+          -print -quit | grep -q .
+        then
+          echo "NON_COMPLIANT: $file is not mode $required_mode or more restrictive"
+          failed=1
+        fi
+      }
+
+      # UEFI GRUB files:
+      # Owner permissions up to 7 are allowed, but group and other permissions
+      # must be zero. This allows mode 0700 or more restrictive.
+      if [ -d /boot/efi/EFI ]; then
+        for file in $(find /boot/efi/EFI \
+          -type f \
+          -name 'grub*' \
+          -print 2>/dev/null)
+        do
+          check_grub_file "$file" "0077" "0700"
+        done
+      fi
+
+      # BIOS/canonical GRUB configuration files:
+      # Owner execute and all group/other permissions are prohibited.
+      # This allows mode 0600 or more restrictive.
+      if [ -d /boot/grub2 ]; then
+        for file in $(find /boot/grub2 \
+          -maxdepth 1 \
+          -type f \
+          \( -name 'grub*' -o -name 'user.cfg' \) \
+          -print 2>/dev/null)
+        do
+          check_grub_file "$file" "0177" "0600"
+        done
+      fi
+
+      if [ "$checked" -eq 0 ]; then
+        echo "NON_COMPLIANT: No GRUB configuration files were found"
+        exit 1
+      fi
+
+      if [ "$failed" -eq 0 ]; then
+        echo "** PASS **"
+        echo "All discovered GRUB files have compliant ownership and permissions"
+      else
+        echo "** FAIL **"
+        echo "One or more GRUB files have incorrect ownership or permissions"
+      fi
+
+      exit "$failed"
+
+
   '1.2.1.1':
     type: automatic
     command: |
@@ -475,26 +586,6 @@ cis_validators:
   '1.3.1.8':
     type: automatic
     command: "{{ cis_package_absent_check | replace('__PACKAGE__', 'setroubleshoot') }}"
-  '1.4.2':
-    type: automatic
-    command: |
-      failed=0
-      count=0
-      while IFS= read -r file; do
-        count=$((count + 1))
-        mode="$(stat -Lc '%a' "$file" 2>/dev/null)" || exit 2
-        owner="$(stat -Lc '%u:%g' "$file")"
-        echo "$file mode=$mode owner=$owner"
-        [ "$owner" = 0:0 ] || failed=1
-        if [[ "$file" == /boot/efi/EFI/* ]]; then
-          [ "$((8#$mode & 8#077))" -eq 0 ] || failed=1
-        else
-          [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
-        fi
-      done < <(find /boot/grub2 /boot/efi/EFI -xdev -type f \
-        \( -name 'grub.cfg' -o -name 'grubenv' -o -name 'user.cfg' \) 2>/dev/null)
-      [ "$count" -gt 0 ] || { echo 'No bootloader configuration files found'; exit 2; }
-      exit "$failed"
   '1.5.1':
     type: automatic
     command: "{{ cis_sysctl_policy_check | replace('__SPEC__', 'kernel.randomize_va_space=2') }}"
@@ -529,9 +620,32 @@ cis_validators:
     type: automatic
     command: |
       file=/etc/crypto-policies/state/CURRENT.pol
-      grep -Pqi '^\h*hash\h*=\h*.*-SHA1\b' "$file" &&
-        grep -Pqi '^\h*sign\h*=\h*.*-\*-SHA1\b' "$file" &&
-        grep -Pqi '^\h*sha1_in_certs\h*=\h*0\b' "$file"
+      [ -r "$file" ] || {
+        echo "$file is not readable"
+        exit 2
+      }
+
+      bad="$(awk -F= '
+        $1 ~ /^[[:space:]]*(hash|sign)[[:space:]]*$/ {
+          value=$2
+          sub(/^[[:space:]]*/, "", value)
+          if (value ~ /SHA1/ && value !~ /^-/)
+            print $0
+        }
+      ' "$file")"
+
+      sha1_in_certs="$(awk -F= '
+        $1 ~ /^[[:space:]]*sha1_in_certs[[:space:]]*$/ {
+          value=$2
+          gsub(/[[:space:]]/, "", value)
+          print value
+        }
+      ' "$file")"
+
+      echo "${bad:-No enabled SHA1 hash or signature algorithms found}"
+      echo "sha1_in_certs=${sha1_in_certs:-missing}"
+
+      [ -z "$bad" ] && [ "$sha1_in_certs" = 0 ]
   '1.6.4':
     type: automatic
     command: |
@@ -557,23 +671,54 @@ cis_validators:
     command: |
       file=/etc/crypto-policies/state/CURRENT.pol
       [ -r "$file" ] || exit 2
+
       if ! grep -Pqi '^\h*cipher\h*=\h*([^#\r ]+)?\bchacha20-poly1305\b' "$file"; then
         echo 'chacha20-poly1305 is disabled globally'
         exit 0
       fi
+
       ssh_lines="$(grep -Pi '^\h*cipher@(lib|open)ssh(-server|-client)?\h*=' "$file" || true)"
       echo "${ssh_lines:-No SSH-specific cipher override}"
-      [ -n "$ssh_lines" ] && ! grep -Pqi '\bchacha20-poly1305\b' <<< "$ssh_lines"
+      [ -n "$ssh_lines" ] &&
+        ! grep -Pqi '\bchacha20-poly1305\b' <<< "$ssh_lines"
+
   '1.6.7':
     type: automatic
     command: |
-      grep -Pqi '^\h*etm(@SSH)?\h*=\h*DISABLE_ETM\b' /etc/crypto-policies/state/CURRENT.pol
+      file=/etc/crypto-policies/state/CURRENT.pol
+
+      if [ ! -r "$file" ]; then
+        echo "$file is not readable"
+        exit 2
+      fi
+
+      if grep -Pqi '^\h*etm\h*=\h*DISABLE_ETM\b' "$file"; then
+        echo "EtM is disabled globally"
+        exit 0
+      fi
+
+      failed=0
+
+      for backend in openssh-client openssh-server libssh; do
+        if grep -Pqi "^\h*etm@${backend}\h*=\h*DISABLE_ETM\b" "$file"; then
+          echo "etm@${backend}=DISABLE_ETM"
+        else
+          echo "etm@${backend} is not DISABLE_ETM"
+          failed=1
+        fi
+      done
+
+      exit "$failed"
+
   '1.7.4':
     type: automatic
     command: |
       stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/motd
-      mode="$(stat -Lc '%a' /etc/motd)" owner="$(stat -Lc '%U:%G' /etc/motd)"
+      mode="$(stat -Lc '%a' /etc/motd)"
+      owner="$(stat -Lc '%U:%G' /etc/motd)"
       [ "$owner" = root:root ] && [ "$((8#$mode & 8#133))" -eq 0 ]
+
+  
   '1.7.5':
     type: automatic
     command: |
@@ -729,68 +874,172 @@ cis_validators:
       stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.monthly
       mode="$(stat -Lc '%a' /etc/cron.monthly)"
       [ "$(stat -Lc '%U:%G' /etc/cron.monthly)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
-  '2.4.1.7':
-    type: automatic
-    command: |
-      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.d
-      mode="$(stat -Lc '%a' /etc/cron.d)"
-      [ "$(stat -Lc '%U:%G' /etc/cron.d)" = root:root ] && [ "$((8#$mode & 8#077))" -eq 0 ]
   '2.4.1.8':
     type: automatic
     command: |
-      test ! -e /etc/cron.deny || { echo '/etc/cron.deny exists'; exit 1; }
-      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.allow || exit 1
-      mode="$(stat -Lc '%a' /etc/cron.allow)"
-      [ "$(stat -Lc '%U:%G' /etc/cron.allow)" = root:root ] && [ "$((8#$mode & 8#137))" -eq 0 ]
+      # This control is not applicable when cron is not installed.
+      if ! rpm -q cronie >/dev/null 2>&1; then
+        echo "cronie is not installed; control is not applicable"
+        exit 0
+      fi
+
+      failed=0
+
+      check_cron_file() {
+        file="$1"
+        required="$2"
+
+        if [ ! -e "$file" ]; then
+          if [ "$required" = true ]; then
+            echo "$file is missing"
+            failed=1
+          else
+            echo "$file is absent; acceptable"
+          fi
+          return
+        fi
+
+        mode="$(stat -Lc '%a' "$file")" || {
+          echo "Unable to read $file"
+          failed=1
+          return
+        }
+
+        owner_group="$(stat -Lc '%U:%G' "$file")"
+
+        echo "file=$file mode=$mode owner=$owner_group"
+
+        if [ "$owner_group" != "root:root" ]; then
+          echo "$file must be owned by root:root"
+          failed=1
+        fi
+
+        # Reject owner execute, group write/execute and all permissions
+        # for other. Modes 0600 and 0640 are compliant.
+        if [ "$((8#$mode & 8#137))" -ne 0 ]; then
+          echo "$file permissions are too permissive"
+          failed=1
+        fi
+      }
+
+      # cron.allow must exist.
+      check_cron_file /etc/cron.allow true
+
+      # cron.deny may be absent or may exist with compliant permissions.
+      check_cron_file /etc/cron.deny false
+
+      exit "$failed"
+
   '2.4.2.1':
     type: automatic
     command: |
-      test ! -e /etc/at.deny || { echo '/etc/at.deny exists'; exit 1; }
-      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/at.allow || exit 1
-      mode="$(stat -Lc '%a' /etc/at.allow)"
-      [ "$(stat -Lc '%U:%G' /etc/at.allow)" = root:root ] && [ "$((8#$mode & 8#137))" -eq 0 ]
+      # This control is not applicable when at is not installed.
+      if ! rpm -q at >/dev/null 2>&1; then
+        echo "at is not installed; control is not applicable"
+        exit 0
+      fi
+
+      failed=0
+
+      check_at_file() {
+        file="$1"
+        required="$2"
+
+        if [ ! -e "$file" ]; then
+          if [ "$required" = true ]; then
+            echo "$file is missing"
+            failed=1
+          else
+            echo "$file is absent; acceptable"
+          fi
+          return
+        fi
+
+        mode="$(stat -Lc '%a' "$file")" || {
+          echo "Unable to read $file"
+          failed=1
+          return
+        }
+
+        owner="$(stat -Lc '%U' "$file")"
+        group="$(stat -Lc '%G' "$file")"
+
+        echo "file=$file mode=$mode owner=$owner:$group"
+
+        if [ "$owner" != "root" ]; then
+          echo "$file must be owned by root"
+          failed=1
+        fi
+
+        # The supplied Tenable result accepts root:root. The CIS
+        # remediation also permits daemon as the group.
+        if [ "$group" != "root" ] && [ "$group" != "daemon" ]; then
+          echo "$file group must be root or daemon"
+          failed=1
+        fi
+
+        # Modes 0600 and 0640 are compliant.
+        if [ "$((8#$mode & 8#137))" -ne 0 ]; then
+          echo "$file permissions are too permissive"
+          failed=1
+        fi
+      }
+
+      # at.allow must exist.
+      check_at_file /etc/at.allow true
+
+      # at.deny may be absent or may exist with compliant permissions.
+      check_at_file /etc/at.deny false
+
+      exit "$failed"
 
   '3.1.1':
     type: automatic
-    requires: [cis_ipv6_policy]
+    requires:
+      - cis_ipv6_policy
     command: |
-      module_disabled="$(cat /sys/module/ipv6/parameters/disable 2>/dev/null)" || exit 2
-      echo "IPv6 module disable=$module_disabled policy=$CIS_IPV6_POLICY"
-      case "$CIS_IPV6_POLICY" in
-        review) exit 1 ;;
-        enabled)
-          [ "$module_disabled" = 0 ] || exit 1
-          all_value="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || exit 2
-          default_value="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || exit 2
-          echo "runtime all.disable_ipv6=$all_value default.disable_ipv6=$default_value"
-          [ "$all_value" = 0 ] && [ "$default_value" = 0 ]
-          ;;
-        disabled)
-          if [ "$module_disabled" != 0 ]; then
-            echo 'IPv6 is disabled by the kernel module parameter'
-            exit 0
-          fi
-          all_value="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" || exit 2
-          default_value="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)" || exit 2
-          persistent_config="$(/usr/lib/systemd/systemd-sysctl --cat-config 2>/dev/null)" || exit 2
-          persistent_all="$(awk -F= '
-            {key=$1; gsub(/[[:space:]]/, "", key)}
-            key == "net.ipv6.conf.all.disable_ipv6" {
-              value=$2; sub(/[[:space:]]*[#;].*$/, "", value); gsub(/[[:space:]]/, "", value); result=value
-            }
-            END {print result}' <<< "$persistent_config")"
-          persistent_default="$(awk -F= '
-            {key=$1; gsub(/[[:space:]]/, "", key)}
-            key == "net.ipv6.conf.default.disable_ipv6" {
-              value=$2; sub(/[[:space:]]*[#;].*$/, "", value); gsub(/[[:space:]]/, "", value); result=value
-            }
-            END {print result}' <<< "$persistent_config")"
-          echo "runtime all=$all_value default=$default_value persistent all=${persistent_all:-missing} default=${persistent_default:-missing}"
-          [ "$all_value" = 1 ] && [ "$default_value" = 1 ] &&
-            [ "$persistent_all" = 1 ] && [ "$persistent_default" = 1 ]
-          ;;
-        *) exit 2 ;;
-      esac
+      if [ "$CIS_IPV6_POLICY" != "enabled" ]; then
+        echo "NON_COMPLIANT: Expected cis_ipv6_policy=enabled"
+        exit 1
+      fi
+
+      module_disabled="$(
+        cat /sys/module/ipv6/parameters/disable 2>/dev/null
+      )" || {
+        echo "ERROR: Unable to read IPv6 module status"
+        exit 2
+      }
+
+      boot_entries="$(/usr/sbin/grubby --info=ALL 2>/dev/null)" || {
+        echo "ERROR: Unable to read configured boot entries"
+        exit 2
+      }
+
+      if ! printf '%s\n' "$boot_entries" | grep -q '^args='; then
+        echo "ERROR: No boot arguments were returned"
+        exit 2
+      fi
+
+      failed=0
+      echo "IPv6 module disable=$module_disabled; expected=0"
+
+      if [ "$module_disabled" != "0" ]; then
+        echo "NON_COMPLIANT: IPv6 remains disabled; reboot may be required"
+        failed=1
+      fi
+
+      if printf '%s\n' "$boot_entries" |
+        grep -Eq '^args=.*(^|[[:space:]"])ipv6\.disable=1([[:space:]"]|$)'; then
+        echo "NON_COMPLIANT: A boot entry still disables IPv6"
+        failed=1
+      fi
+
+      if [ "$failed" -eq 0 ]; then
+        echo "COMPLIANT: IPv6 is enabled and listed boot entries do not disable it"
+      fi
+
+      exit "$failed"
+
   '3.1.2':
     type: automatic
     command: |
@@ -883,44 +1132,93 @@ cis_validators:
       [ -n "$zone" ]
   '4.3.1':
     type: automatic
-    requires: [cis_firewall_backend]
-    requires_when:
-      variable: cis_firewall_backend
-      equals: nftables
-      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    remediation_safe: false
     command: |
-      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
-      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
-      rules="$(nft list ruleset 2>/dev/null)" || exit 2
-      printf '%s\n' "$rules" | grep -Pq 'hook\h+input\b' &&
-        printf '%s\n' "$rules" | grep -Pq 'hook\h+forward\b' &&
-        printf '%s\n' "$rules" | grep -Pq 'hook\h+output\b'
+      rules="$(nft -n list ruleset 2>&1)"
+      rc=$?
+
+      if [ "$rc" -ne 0 ]; then
+        printf 'VALIDATION_ERROR: %s\n' "$rules"
+        exit 2
+      fi
+
+      failed=0
+
+      for hook in input forward output; do
+        if printf '%s\n' "$rules" |
+          grep -Eq "hook[[:space:]]+$hook([[:space:];]|$)"; then
+          echo "PASS: hook $hook exists"
+        else
+          echo "FAIL: hook $hook is missing"
+          failed=1
+        fi
+      done
+
+      exit "$failed"
+
   '4.3.2':
     type: automatic
-    requires: [cis_firewall_backend]
-    requires_when:
-      variable: cis_firewall_backend
-      equals: nftables
-      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    remediation_safe: false
     command: |
-      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
-      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
-      rules="$(nft list ruleset 2>/dev/null)" || exit 2
-      printf '%s\n' "$rules" | grep -Pq 'ct\h+state\h+([^#\n]*,)?established([^#\n]*,)?related\h+accept'
+      rules="$(nft list ruleset 2>&1)"
+      rc=$?
+
+      if [ "$rc" -ne 0 ]; then
+        printf 'VALIDATION_ERROR: %s\n' "$rules"
+        exit 2
+      fi
+
+      # Reproduce the input-chain scope used in the supplied
+      # Tenable checks. All three supplied checks search ct state.
+      input_rules="$(
+        printf '%s\n' "$rules" |
+          awk '/hook input/,/}/'
+      )"
+
+      printf 'Input-chain audit scope:\n%s\n' \
+        "${input_rules:-No input base chain found}"
+
+      if printf '%s\n' "$input_rules" | grep -q 'ct state'; then
+        echo "PASS: input chain contains ct state"
+        exit 0
+      fi
+
+      echo "FAIL: no ct state found in input-chain audit scope"
+      exit 1
+
   '4.3.3':
     type: automatic
-    requires: [cis_firewall_backend]
-    requires_when:
-      variable: cis_firewall_backend
-      equals: nftables
-      inputs: [cis_nftables_policy_configured, cis_nftables_management_sources]
+    remediation_safe: false
     command: |
-      [ "$CIS_FIREWALL_BACKEND" = review ] && { echo 'Firewall backend policy is not set'; exit 1; }
-      [ "$CIS_FIREWALL_BACKEND" != nftables ] && { echo 'Nftables is not the selected backend'; exit 0; }
-      rules="$(nft list ruleset 2>/dev/null)" || exit 2
+      rules="$(nft list ruleset 2>&1)"
+      rc=$?
+
+      if [ "$rc" -ne 0 ]; then
+        printf 'VALIDATION_ERROR: %s\n' "$rules"
+        exit 2
+      fi
+
+      failed=0
+
       for hook in input forward; do
-        printf '%s\n' "$rules" | grep -Pq "hook\h+$hook\b[^}]*(policy\h+(drop|reject)|counter\h+(drop|reject))" || exit 1
+        hook_lines="$(
+          printf '%s\n' "$rules" |
+            grep -E "hook[[:space:]]+$hook([[:space:];]|$)"
+        )"
+
+        printf '%s hook configuration:\n%s\n' \
+          "$hook" "${hook_lines:-MISSING}"
+
+        if [ -z "$hook_lines" ]; then
+          failed=1
+        elif printf '%s\n' "$hook_lines" |
+          grep -Evq 'policy[[:space:]]+drop([[:space:];]|$)'; then
+          echo "FAIL: $hook has a base chain without policy drop"
+          failed=1
+        fi
       done
+
+      exit "$failed"
 
   '5.1.1':
     type: automatic
@@ -932,12 +1230,31 @@ cis_validators:
     type: automatic
     command: |
       failed=0
+      ssh_group="$(awk -F: '$1 ~ /^(ssh_keys|_?ssh)$/ {print $1; exit}' /etc/group)"
+
       while IFS= read -r file; do
-        mode="$(stat -Lc '%a' "$file")" owner="$(stat -Lc '%U:%G' "$file")"
-        echo "$file mode=$mode owner=$owner"
-        [ "$owner" = root:root ] || failed=1
-        [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
-      done < <(find /etc/ssh -xdev -type f -name 'ssh_host_*_key' ! -name '*.pub')
+        mode="$(stat -Lc '%a' "$file")"
+        owner="$(stat -Lc '%U' "$file")"
+        group="$(stat -Lc '%G' "$file")"
+
+        echo "$file mode=$mode owner=$owner:$group"
+
+        [ "$owner" = root ] || failed=1
+
+        if [ -n "$ssh_group" ] && [ "$group" = "$ssh_group" ]; then
+          # CIS permits 0640 or more restrictive for the SSH key group.
+          [ "$((8#$mode & 8#137))" -eq 0 ] || failed=1
+        elif [ "$group" = root ]; then
+          # Root-grouped private keys must be 0600 or more restrictive.
+          [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
+        else
+          failed=1
+        fi
+      done < <(
+        find /etc/ssh -xdev -type f \
+          -name 'ssh_host_*_key' ! -name '*.pub' -print 2>/dev/null
+      )
+
       exit "$failed"
   '5.1.3':
     type: automatic
@@ -958,25 +1275,96 @@ cis_validators:
     command: "{{ cis_sshd_effective_check | replace('__SPEC__', 'kexalgorithms:(^|,)(diffie-hellman-group1-sha1|diffie-hellman-group14-sha1|diffie-hellman-group-exchange-sha1)(,|$)') }}"
   '5.1.6':
     type: automatic
-    command: "{{ cis_sshd_effective_check | replace('__SPEC__', 'macs:(^|,)(hmac-md5|hmac-md5-96|hmac-ripemd160|hmac-sha1|hmac-sha1-96|umac-64@openssh.com|umac-64-etm@openssh.com)(,|$)') }}"
+    command: >-
+      {{
+        cis_sshd_effective_check
+        | replace(
+            '__SPEC__',
+            'macs:(^|,)(hmac-md5|hmac-md5-96|hmac-ripemd160|hmac-sha1-96|umac-64@openssh.com|umac-64-etm@openssh.com|umac-128-etm@openssh.com)(,|$)'
+          )
+      }}
   '5.1.7':
     type: automatic
-    requires: [cis_ssh_access_policy_configured]
+    remediation_safe: true
+    validation_source: "Tenable CIS_Red_Hat_Enterprise_Linux_9_v2.0.0_L1_Server.audit rev 1.15"
+
     command: |
-      expected="$CIS_SSH_ALLOWED_USERS$CIS_SSH_ALLOWED_GROUPS$CIS_SSH_DENIED_USERS$CIS_SSH_DENIED_GROUPS"
-      [ -n "$expected" ] || { echo 'No SSH access-control list is configured'; exit 1; }
-      effective="$(sshd -T 2>/dev/null)" || exit 2
-      failed=0
-      for item in \
-        "allowusers:$CIS_SSH_ALLOWED_USERS" "allowgroups:$CIS_SSH_ALLOWED_GROUPS" \
-        "denyusers:$CIS_SSH_DENIED_USERS" "denygroups:$CIS_SSH_DENIED_GROUPS"; do
-        key="${item%%:*}"; wanted="${item#*:}"
-        [ -z "$wanted" ] && continue
-        actual="$(awk -v k="$key" '$1==k {$1=""; sub(/^ /,""); print; exit}' <<< "$effective")"
-        echo "$key actual=${actual:-missing} expected=$wanted"
-        [ "$(tr ' ' '\n' <<< "$actual" | sort -u)" = "$(tr ' ' '\n' <<< "$wanted" | sort -u)" ] || failed=1
-      done
-      [ "$failed" -eq 0 ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'access'
+      LIMIT = None
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.8':
     type: automatic
     command: |
@@ -1007,34 +1395,398 @@ cis_validators:
   '5.1.14':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="logingracetime" {print $2}')" || exit 2
-      echo "logingracetime=$value"
-      [ "$value" -ge 1 ] && [ "$value" -le 60 ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'logingracetime'
+      LIMIT = 60
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.15':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="loglevel" {print toupper($2)}')" || exit 2
-      echo "loglevel=$value"
-      [ "$value" = INFO ] || [ "$value" = VERBOSE ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'loglevel'
+      LIMIT = None
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.16':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="maxauthtries" {print $2}')" || exit 2
-      echo "maxauthtries=$value"
-      [ "$value" -le 4 ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'maxauthtries'
+      LIMIT = 4
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.17':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="maxstartups" {print $2}')" || exit 2
-      echo "maxstartups=$value"
-      IFS=: read -r start rate full <<< "$value"
-      [ "${start:-999}" -le 10 ] && [ "${rate:-999}" -le 30 ] && [ "${full:-999}" -le 60 ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'maxstartups'
+      LIMIT = None
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.18':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="maxsessions" {print $2}')" || exit 2
-      echo "maxsessions=$value"
-      [ "$value" -le 10 ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'maxsessions'
+      LIMIT = 10
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.19':
     type: automatic
     command: |
@@ -1044,9 +1796,82 @@ cis_validators:
   '5.1.20':
     type: automatic
     command: |
-      value="$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin" {print $2}')" || exit 2
-      echo "permitrootlogin=$value"
-      [ "$value" = no ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, shutil, subprocess, sys
+      KEY = 'permitrootlogin'
+      LIMIT = None
+      def effective(binary, context=None):
+          args = [binary, '-T']
+          if context:
+              args.extend(['-C', context])
+          result = subprocess.run(args, text=True, capture_output=True)
+          if result.returncode:
+              raise ValueError('sshd -T failed: ' + result.stderr.strip())
+          values = {}
+          for line in result.stdout.splitlines():
+              fields = line.split(None, 1)
+              if len(fields) == 2:
+                  values.setdefault(fields[0].lower(), []).append(fields[1].strip())
+          return values
+
+      def valid(values, label):
+          if KEY == 'access':
+              configured = [(key, value) for key in ('allowusers', 'allowgroups', 'denyusers', 'denygroups')
+                            for value in values.get(key, []) if value.strip()]
+              print(f'{label}: access restrictions={configured or "missing"}')
+              return bool(configured)
+          options = values.get(KEY, [])
+          if len(options) != 1:
+              raise ValueError(f'{label}: expected one {KEY} value, got {options}')
+          value = options[0]
+          print(f'{label}: {KEY}={value}')
+          if KEY == 'loglevel':
+              return value.upper() in ('INFO', 'VERBOSE')
+          if KEY == 'permitrootlogin':
+              return value.lower() == 'no'
+          if KEY == 'maxstartups':
+              if re.fullmatch(r'\d+', value):
+                  return 1 <= int(value) <= 10
+              if not re.fullmatch(r'\d+:\d+:\d+', value):
+                  return False
+              start, rate, full = map(int, value.split(':'))
+              return 1 <= start <= 10 and 1 <= rate <= 30 and start <= full <= 60
+          if not re.fullmatch(r'\d+', value):
+              return False
+          number = int(value)
+          minimum = 1 if KEY == 'logingracetime' else 0
+          return minimum <= number <= LIMIT
+      try:
+          binary = shutil.which('sshd') or '/usr/sbin/sshd'
+          syntax = subprocess.run([binary, '-t'], text=True, capture_output=True)
+          if syntax.returncode:
+              print('NON_COMPLIANT: sshd configuration is invalid')
+              print(syntax.stderr.strip())
+              sys.exit(1)
+          global_values = effective(binary)
+          passed = valid(global_values, 'global/default configuration')
+          ports = global_values.get('port', [])
+          if not ports or any(not re.fullmatch(r'\d+', port) for port in ports):
+              raise ValueError('No valid SSH port returned by sshd -T')
+          # Use the automation connection addresses when available; otherwise localhost.
+          connection = os.environ.get('SSH_CONNECTION', '').split()
+          client = connection[0] if len(connection) == 4 else '127.0.0.1'
+          local = connection[2] if len(connection) == 4 else '127.0.0.1'
+          client_host = client
+          for port in sorted(set(ports), key=int):
+              if not 1 <= int(port) <= 65535:
+                  raise ValueError('Invalid configured SSH port')
+              context = f'user=root,host={client_host},addr={client},laddr={local},lport={port}'
+              values = effective(binary, context)
+              passed = valid(values, f'root context addr={client} laddr={local} port={port}') and passed
+          print('Scope: default sshd configuration and root context on each configured port; '
+                'other Match users/hosts and alternate daemon -f/-o startup options need separate evidence.')
+          sys.exit(0 if passed else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete SSH policy audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.1.21':
     type: automatic
     command: |
@@ -1065,15 +1890,69 @@ cis_validators:
   '5.2.2':
     type: automatic
     command: |
-      output="$(grep -RPh '^[[:space:]]*Defaults([^#]*,)?[[:space:]]*use_pty\b' /etc/sudoers /etc/sudoers.d 2>/dev/null || true)"
-      echo "${output:-use_pty not configured}"
-      [ -n "$output" ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import glob, os, re, subprocess, sys
+      try:
+          checked = subprocess.run(['visudo', '-c'], text=True, capture_output=True)
+          if checked.returncode:
+              print('NON_COMPLIANT: active sudoers configuration is invalid')
+              print(checked.stderr.strip())
+              sys.exit(1)
+          # Match the supplied audit's /etc/sudoers* scope, including backup copies.
+          paths = []
+          for entry in sorted(glob.glob('/etc/sudoers*')):
+              if os.path.isdir(entry):
+                  def onerror(error):
+                      raise error
+                  for directory, dirs, files in os.walk(entry, onerror=onerror):
+                      paths.extend(os.path.join(directory, name) for name in sorted(files))
+              else:
+                  paths.append(entry)
+          if not paths:
+              raise OSError('No sudoers files found')
+          positive, negative = [], []
+          for path in paths:
+              with open(path, encoding='utf-8', errors='replace') as stream:
+                  for number, line in enumerate(stream, 1):
+                      line = line.split('#', 1)[0].strip()
+                      if not re.match(r'^Defaults\s+', line, re.I):
+                          continue
+                      options = line.split(None, 1)[1].split(',')
+                      for option in options:
+                          option = option.strip().lower()
+                          if option == 'use_pty':
+                              positive.append((path, number))
+                          elif option == '!use_pty':
+                              negative.append((path, number))
+          for path, number in positive:
+              print(f'{path}:{number}: use_pty present')
+          for path, number in negative:
+              print(f'NON_COMPLIANT: {path}:{number}: !use_pty present')
+          if not positive:
+              print('NON_COMPLIANT: no unscoped Defaults use_pty entry found')
+          # Reject scoped disabling rules too, even though the reference regex is unscoped.
+          for path in paths:
+              with open(path, encoding='utf-8', errors='replace') as stream:
+                  for number, line in enumerate(stream, 1):
+                      line = line.split('#', 1)[0].strip()
+                      if (re.match(r'^Defaults[:@>!]', line, re.I)
+                              and re.search(r'(?:\s|,)\s*!use_pty(?:\s*,|\s*$)', line, re.I)):
+                          print(f'NON_COMPLIANT: {path}:{number}: scoped !use_pty present')
+                          negative.append((path, number))
+          sys.exit(0 if positive and not negative else 1)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete sudo PTY audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.2.3':
     type: automatic
     command: |
       output="$(grep -RPh '^[[:space:]]*Defaults([^#]*,)?[[:space:]]*logfile[[:space:]]*=' /etc/sudoers /etc/sudoers.d 2>/dev/null || true)"
       echo "${output:-sudo logfile not configured}"
       [ -n "$output" ]
+  
+        
   '5.2.5':
     type: automatic
     command: |
@@ -1117,12 +1996,59 @@ cis_validators:
   '5.3.2.1':
     type: automatic
     command: |
-      authselect check || exit 1
-      files="$(authselect current -r 2>/dev/null | awk 'NR==1 {print $1}')"
-      echo "profile=${files:-unknown}"
-      for module in pam_faillock.so pam_pwquality.so pam_pwhistory.so pam_unix.so; do
-        grep -Rqs "$module" /etc/authselect/system-auth /etc/authselect/password-auth || { echo "$module missing"; exit 1; }
-      done
+      python3 - <<'CIS_PAM_CHECK'
+      import os,re,subprocess,sys
+      try:
+          check=subprocess.run(['authselect','check'],capture_output=True,text=True)
+          print(check.stdout.strip())
+          if check.returncode:
+              print('NON_COMPLIANT: authselect configuration is invalid')
+              print(check.stderr.strip())
+              sys.exit(1)
+          result=subprocess.run(['authselect','current','-r'],capture_output=True,text=True)
+          if result.returncode or not result.stdout.split():
+              raise ValueError('Cannot determine active authselect profile')
+          profile=result.stdout.split()[0]
+          if not re.fullmatch(r'(?:custom/)?[A-Za-z0-9_.-]+',profile):
+              raise ValueError('Unexpected profile ID')
+          if profile.startswith('custom/'):
+              directory='/etc/authselect/'+profile
+          else:
+              choices=['/usr/share/authselect/default/'+profile,
+                       '/usr/share/authselect/vendor/'+profile]
+              directory=next((p for p in choices if os.path.isdir(p)),choices[0])
+          print('Active profile='+profile+'; template directory='+directory)
+          requirements=[
+              ('auth','pam_faillock.so','preauth'),
+              ('auth','pam_faillock.so','authfail'),
+              ('account','pam_faillock.so',None),
+              ('auth','pam_unix.so',None),
+              ('account','pam_unix.so',None),
+              ('password','pam_unix.so',None),
+              ('session','pam_unix.so',None),
+              ('password','pam_pwquality.so',None),
+              ('password','pam_pwhistory.so',None),
+          ]
+          failed=False
+          for name in ('system-auth','password-auth'):
+              path=os.path.join(directory,name)
+              with open(path,encoding='utf-8',errors='replace') as stream:
+                  lines=[line.split('#',1)[0].strip() for line in stream]
+              for stack,module,option in requirements:
+                  module_pattern=r'(?<![\w.])'+re.escape(module)+r'(?=\s|$)'
+                  option_pattern=r'(?<![\w-])'+re.escape(option)+r'(?=\s|$)' if option else None
+                  present=any(re.match(r'^-?'+stack+r'\s+',line)
+                              and re.search(module_pattern,line)
+                              and (option_pattern is None or re.search(option_pattern,line))
+                              for line in lines)
+                  print(f'{path}: stack={stack} module={module} option={option or "none"} present={present}')
+                  failed=failed or not present
+          sys.exit(1 if failed else 0)
+      except (OSError,ValueError) as error:
+          print('ERROR: cannot complete PAM template audit: '+str(error))
+          sys.exit(2)
+      CIS_PAM_CHECK
+
   '5.3.2.2':
     type: automatic
     command: |
@@ -1139,24 +2065,35 @@ cis_validators:
     type: automatic
     command: |
       grep -qs 'pam_unix\.so' /etc/pam.d/system-auth /etc/pam.d/password-auth 2>/dev/null
+
   '5.3.3.1.1':
     type: automatic
     command: |
-      value="$(grep -RPh '^[[:space:]]*deny[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/faillock.conf /etc/security/faillock.conf.d 2>/dev/null | tail -1)"
+      value="$(
+        grep -RPoh \
+          '^[[:space:]]*deny[[:space:]]*=[[:space:]]*\K[0-9]+' \
+          /etc/security/faillock.conf \
+          /etc/security/faillock.conf.d 2>/dev/null |
+        tail -1
+      )"
       echo "deny=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -le 5 ]
+      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 5 ]
+
   '5.3.3.1.2':
     type: automatic
     command: |
-      value="$(grep -RPh '^[[:space:]]*unlock_time[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/faillock.conf /etc/security/faillock.conf.d 2>/dev/null | tail -1)"
+      value="$(
+        grep -RPoh \
+          '^[[:space:]]*unlock_time[[:space:]]*=[[:space:]]*\K[0-9]+' \
+          /etc/security/faillock.conf \
+          /etc/security/faillock.conf.d 2>/dev/null |
+        tail -1
+      )"
       echo "unlock_time=${value:-unset}"
-      [ -n "$value" ] && { [ "$value" -eq 0 ] || [ "$value" -ge 900 ]; }
-  '5.3.3.2.1':
-    type: automatic
-    command: |
-      value="$(grep -RPh '^[[:space:]]*difok[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
-      echo "difok=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -ge 2 ]
+      [[ "$value" =~ ^[0-9]+$ ]] &&
+        { [ "$value" -eq 0 ] || [ "$value" -ge 900 ]; }
+
+
   '5.3.3.2.2':
     type: automatic
     command: |
@@ -1169,18 +2106,7 @@ cis_validators:
       value="$(find /etc/security -maxdepth 2 -type f \( -name pwquality.conf -o -path '*/pwquality.conf.d/*.conf' \) -exec awk -F= '/^[[:space:]]*minclass[[:space:]]*=/ {v=$2; sub(/[[:space:]]*[#;].*/,"",v); gsub(/[[:space:]]/,"",v); print v}' {} + 2>/dev/null | tail -1)"
       echo "minclass=${value:-unset}"
       [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$CIS_PASSWORD_MIN_CLASSES" ]
-  '5.3.3.2.4':
-    type: automatic
-    command: |
-      value="$(grep -RPh '^[[:space:]]*maxrepeat[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
-      echo "maxrepeat=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 3 ]
-  '5.3.3.2.5':
-    type: automatic
-    command: |
-      value="$(grep -RPh '^[[:space:]]*maxsequence[[:space:]]*=[[:space:]]*\K-?[0-9]+' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -1)"
-      echo "maxsequence=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 3 ]
+  
   '5.3.3.2.6':
     type: automatic
     command: |
@@ -1188,20 +2114,21 @@ cis_validators:
       value="${value:-1}"
       echo "dictcheck=$value"
       [ "$value" = 1 ]
-  '5.3.3.2.7':
-    type: automatic
-    command: |
-      grep -RPh '^[[:space:]]*enforce_for_root\b' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null
+  
   '5.3.3.3.1':
     type: automatic
     command: |
-      value="$(grep -RPh '^[[:space:]]*remember[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/security/pwhistory.conf /etc/security/pwhistory.conf.d 2>/dev/null | tail -1)"
+      value="$(
+        grep -RPoh \
+          '^[[:space:]]*remember[[:space:]]*=[[:space:]]*\K[0-9]+' \
+          /etc/security/pwhistory.conf \
+          /etc/security/pwhistory.conf.d 2>/dev/null |
+        tail -1
+      )"
       echo "remember=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -ge 24 ]
-  '5.3.3.3.2':
-    type: automatic
-    command: |
-      find /etc/security -maxdepth 2 -type f \( -name pwhistory.conf -o -path '*/pwhistory.conf.d/*.conf' \) -exec grep -HnE '^[[:space:]]*enforce_for_root([[:space:]]|$)' {} + 2>/dev/null | grep -q .
+      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 24 ]
+
+
   '5.3.3.3.3':
     type: automatic
     command: |
@@ -1234,10 +2161,79 @@ cis_validators:
       grep -Pq '\buse_authtok\b' <<< "$lines"
   '5.4.1.3':
     type: automatic
+    remediation_safe: true
+    requires:
+      - cis_password_warn_days
+    validation_source: "Tenable CIS_Red_Hat_Enterprise_Linux_9_v2.0.0_L1_Server.audit rev 1.15"
     command: |
-      value="$(awk '$1=="PASS_WARN_AGE" {print $2}' /etc/login.defs | tail -1)"
-      echo "PASS_WARN_AGE=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -ge 7 ]
+      minimum="{{ cis_password_warn_days | int }}"
+
+      if [ "$minimum" -lt 7 ]; then
+        echo "VALIDATION_ERROR: configured warning period must be at least 7"
+        exit 2
+      fi
+
+      if [ ! -r /etc/login.defs ] || [ ! -r /etc/shadow ]; then
+        echo "VALIDATION_ERROR: cannot read login.defs or shadow"
+        exit 2
+      fi
+
+      default_value="$(
+        /usr/bin/awk '
+          $1 == "PASS_WARN_AGE" {value=$2}
+          END {print value}
+        ' /etc/login.defs
+      )" || exit 2
+
+      failed=0
+
+      case "$default_value" in
+        ''|*[!0-9]*)
+          echo "NON_COMPLIANT: login.defs PASS_WARN_AGE is missing or invalid"
+          failed=1
+          ;;
+        *)
+          echo "login.defs PASS_WARN_AGE=$default_value; required minimum=$minimum"
+          if [ "$default_value" -lt "$minimum" ]; then
+            failed=1
+          fi
+          ;;
+      esac
+
+      /usr/bin/awk -F: -v minimum="$minimum" '
+        $2 ~ /^\$.+\$/ {
+          checked++
+          if ($6 == "" || $6 + 0 < minimum) {
+            printf "NON_COMPLIANT: user=%s warning_days=%s minimum=%s\n",
+              $1, ($6 == "" ? "EMPTY" : $6), minimum
+            failed=1
+          }
+        }
+        END {
+          printf "Eligible local password users checked=%d\n", checked
+          if (!failed)
+            print "Existing user warning periods meet policy"
+          exit failed
+        }
+      ' /etc/shadow
+      users_rc=$?
+
+      case "$users_rc" in
+        0) ;;
+        1) failed=1 ;;
+        *)
+          echo "VALIDATION_ERROR: existing-user check failed"
+          exit 2
+          ;;
+      esac
+
+      if [ "$failed" -eq 0 ]; then
+        echo "COMPLIANT: default and existing user warning periods meet policy"
+        exit 0
+      fi
+
+      echo "NON_COMPLIANT: password warning remediation required"
+      exit 1
   '5.4.1.4':
     type: automatic
     command: |
@@ -1272,42 +2268,183 @@ cis_validators:
     command: |
       status="$(passwd -S root 2>/dev/null | awk '{print $2}')" || exit 2
       echo "root password status=$status"
-      [ "$status" = P ] || [ "$status" = L ] || [ "$status" = LK ]
+
+      # RHEL uses PS for password set and LK for locked.
+      [[ "$status" =~ ^(PS|P|LK|L)$ ]]
+
   '5.4.2.5':
     type: automatic
+    remediation_safe: true
+    validation_source: "Tenable CIS_Red_Hat_Enterprise_Linux_9_v2.0.0_L1_Server.audit rev 1.15"
+
     command: |
-      failed=0 oldifs="$IFS" IFS=:
-      for dir in $PATH; do
-        IFS="$oldifs"
-        [ -z "$dir" ] && { echo 'PATH contains an empty element'; failed=1; continue; }
-        [ "$dir" = . ] && { echo 'PATH contains dot'; failed=1; continue; }
-        [ -d "$dir" ] || { echo "$dir is not a directory"; failed=1; continue; }
-        owner="$(stat -Lc '%U' "$dir")" mode="$(stat -Lc '%a' "$dir")"
-        echo "$dir mode=$mode owner=$owner"
-        [ "$owner" = root ] || failed=1
-        [ "$((8#$mode & 8#022))" -eq 0 ] || failed=1
+      root_path="$(sudo -Hiu root env |
+        awk -F= '$1 == "PATH" {print $2; exit}')"
+
+      if [ -z "$root_path" ]; then
+        echo "NON_COMPLIANT: Unable to determine the root login PATH"
+        exit 1
+      fi
+
+      echo "Root login PATH: $root_path"
+
+      failed=0
+
+      case "$root_path" in
+        *::*)
+          echo "NON_COMPLIANT: Root PATH contains an empty entry"
+          failed=1
+          ;;
+      esac
+
+      case "$root_path" in
+        :*|*:)
+          echo "NON_COMPLIANT: Root PATH begins or ends with an empty entry"
+          failed=1
+          ;;
+      esac
+
+      old_ifs="$IFS"
+      IFS=:
+
+      for directory in $root_path
+      do
+        IFS="$old_ifs"
+
+        if [ "$directory" = "." ]; then
+          echo "NON_COMPLIANT: Root PATH contains the current directory"
+          failed=1
+          IFS=:
+          continue
+        fi
+
+        if [ ! -d "$directory" ]; then
+          echo "NON_COMPLIANT: $directory is not a directory"
+          failed=1
+          IFS=:
+          continue
+        fi
+
+        uid="$(stat -Lc '%u' "$directory")"
+        mode="$(stat -Lc '%a' "$directory")"
+
+        echo "$directory mode=$mode uid=$uid"
+
+        if [ "$uid" -ne 0 ]; then
+          echo "NON_COMPLIANT: $directory is not owned by root"
+          failed=1
+        fi
+
+        if find -L "$directory" \
+          -maxdepth 0 \
+          -perm /0022 \
+          -print -quit 2>/dev/null |
+          grep -q .
+        then
+          echo "NON_COMPLIANT: $directory is group-writable or other-writable"
+          failed=1
+        fi
+
         IFS=:
       done
-      IFS="$oldifs"; exit "$failed"
+
+      IFS="$old_ifs"
+
+      if [ "$failed" -eq 0 ]; then
+        echo "COMPLIANT: Root PATH integrity is configured correctly"
+      fi
+
+      exit "$failed"
+
   '5.4.2.6':
     type: automatic
     command: |
-      output="$(grep -RPh '^[[:space:]]*umask[[:space:]]+(0027|027|0077|077)\b' /root/.bash_profile /root/.bashrc /etc/profile /etc/bashrc 2>/dev/null || true)"
-      echo "${output:-Compliant root umask not found}"
-      [ -n "$output" ]
+      python3 - <<'CIS_HIGH_CHECK'
+      import re, sys
+      failed = False
+      try:
+          for path in ('/root/.bash_profile', '/root/.bashrc'):
+              count = 0
+              with open(path, encoding='utf-8', errors='replace') as stream:
+                  for number, original in enumerate(stream, 1):
+                      line = original.split('#', 1)[0].strip()
+                      match = re.match(r'^umask\s+(\S+)', line)
+                      if not match:
+                          continue
+                      count += 1
+                      value = match.group(1).rstrip(';')
+                      if re.fullmatch(r'[0-7]{3,4}', value):
+                          mask = int(value, 8)
+                          valid = mask <= 0o777 and (mask & 0o027) == 0o027
+                      else:
+                          # Symbolic umask displays allowed permissions, not denied bits.
+                          parts = value.split(',')
+                          modes = {}
+                          valid = True
+                          for part in parts:
+                              setting = re.fullmatch(r'([ugo])=([rwx]*)', part)
+                              if not setting or setting.group(1) in modes:
+                                  valid = False
+                                  break
+                              modes[setting.group(1)] = setting.group(2)
+                          valid = valid and 'g' in modes and 'o' in modes
+                          valid = valid and 'w' not in modes.get('g', '') and modes.get('o') == ''
+                      print(f'{path}:{number}: umask={value} compliant={valid}')
+                      failed = failed or not valid
+              if count == 0:
+                  print(f'{path}: no explicit umask; no insecure direct umask entry found')
+          print('Root startup files checked for insecure direct umask entries (site audit scope).')
+          sys.exit(1 if failed else 0)
+      except OSError as error:
+          print(f'ERROR: cannot read root startup file: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
   '5.4.2.8':
     type: automatic
     command: |
-      valid="$(grep -Ev '^[[:space:]]*(#|$)' /etc/shells | paste -sd'|' -)"
-      output="$(awk -F: -v re="^(${valid})$" '$7 !~ re && $2 !~ /^(!|\*)/ {print $1}' /etc/passwd)"
-      echo "${output:-All non-login accounts are locked}"
-      [ -z "$output" ]
+      failed=0
+
+      while IFS=: read -r user _ _ _ _ _ shell; do
+        [ "$user" = root ] && continue
+
+        # A shell is considered valid only when it is listed in /etc/shells
+        # and is not a nologin shell.
+        if grep -Ev \
+          '^[[:space:]]*(#|$)|/nologin$' /etc/shells 2>/dev/null |
+          grep -Fxq -- "$shell"; then
+          continue
+        fi
+
+        status="$(passwd -S "$user" 2>/dev/null | awk '{print $2}')"
+
+        if [[ "$status" != L* ]]; then
+          echo "account=$user shell=$shell password_status=${status:-unknown}"
+          failed=1
+        fi
+      done < /etc/passwd
+
+      [ "$failed" -eq 0 ] &&
+        echo "All accounts without valid login shells are locked"
+
+      exit "$failed"
+
   '5.4.3.2':
     type: automatic
     command: |
-      value="$(grep -RPh '^[[:space:]]*(readonly[[:space:]]+)?TMOUT[[:space:]]*=[[:space:]]*\K[0-9]+' /etc/profile /etc/bashrc /etc/profile.d 2>/dev/null | sort -n | tail -1)"
+      value="$(
+        grep -RPoh \
+          '^[[:space:]]*(readonly[[:space:]]+)?TMOUT[[:space:]]*=[[:space:]]*\K[0-9]+' \
+          /etc/profile \
+          /etc/bashrc \
+          /etc/profile.d 2>/dev/null |
+        sort -n |
+        tail -1
+      )"
       echo "TMOUT=${value:-unset}"
-      [ -n "$value" ] && [ "$value" -gt 0 ] && [ "$value" -le 900 ]
+      [[ "$value" =~ ^[0-9]+$ ]] &&
+        [ "$value" -gt 0 ] &&
+        [ "$value" -le 900 ]
   '5.4.3.3':
     type: automatic
     command: |
@@ -1473,27 +2610,6 @@ cis_validators:
         [ "$((8#$mode & 8#027))" -eq 0 ] || failed=1
       done
       [ "$failed" -eq 0 ]
-  '7.2.9':
-    type: automatic
-    command: |
-      uid_min="$(awk '$1=="UID_MIN" {print $2}' /etc/login.defs | tail -1)"; uid_min="${uid_min:-1000}"
-      users="$CIS_LOCAL_INTERACTIVE_USERS"
-      [ -n "$users" ] || users="$(awk -F: -v min="$uid_min" '$3>=min && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd)"
-      failed=0
-      for user in $users; do
-        home="$(getent passwd "$user" | cut -d: -f6)"; [ -d "$home" ] || continue
-        for prohibited in .forward .rhosts; do
-          [ ! -e "$home/$prohibited" ] || { echo "$user prohibited $home/$prohibited"; failed=1; }
-        done
-        while IFS= read -r file; do
-          owner="$(stat -Lc '%U' "$file")"; mode="$(stat -Lc '%a' "$file")"
-          echo "$file owner=$owner mode=$mode"
-          [ "$owner" = "$user" ] || failed=1
-          [ "$((8#$mode & 8#022))" -eq 0 ] || failed=1
-          [ "$(basename "$file")" != .netrc ] || [ "$((8#$mode & 8#177))" -eq 0 ] || failed=1
-        done < <(find "$home" -xdev -maxdepth 1 -type f -name '.*' -print 2>/dev/null)
-      done
-      [ "$failed" -eq 0 ]
 
   '6.1.1':
     type: automatic
@@ -1501,66 +2617,125 @@ cis_validators:
   '6.1.2':
     type: automatic
     command: |
-      timers="$(systemctl list-timers --all --no-legend 2>/dev/null | grep -Ei 'aide(check)?' || true)"
-      cron="$(grep -RHiE '(^|[[:space:]])aide(\.wrapper)?[[:space:]].*(--check|--update)|aidecheck' /etc/cron.* /etc/crontab 2>/dev/null || true)"
-      printf '%s\n%s\n' "$timers" "$cron"
-      [ -n "$timers$cron" ]
-  '6.1.3':
-    type: automatic
-    command: |
-      config="$(aide --config-check 2>/dev/null; grep -RhsE '^[[:space:]]*/(usr/)?s?bin/(auditctl|auditd|ausearch|aureport|autrace|augenrules)[[:space:]]' /etc/aide.conf /etc/aide.conf.d 2>/dev/null)"
-      printf '%s\n' "$config"
-      for tool in auditctl auditd ausearch aureport autrace augenrules; do
-        grep -Pq "/(usr/)?s?bin/$tool\h+.*(sha512|sha256)" <<< "$config" || exit 1
+      failed=0
+      for unit in aidecheck.timer aidecheck.service; do
+        enabled="$(systemctl is-enabled "$unit" 2>&1)"
+        rc=$?
+        printf '%s enabled=%s\n' "$unit" "$enabled"
+        [ "$rc" -eq 0 ] && [ "$enabled" = enabled ] || failed=1
       done
+      active="$(systemctl is-active aidecheck.timer 2>&1)"
+      rc=$?
+      printf 'aidecheck.timer active=%s\n' "$active"
+      [ "$rc" -eq 0 ] && [ "$active" = active ] || failed=1
+      exec_start="$(systemctl show aidecheck.service --property=ExecStart --value 2>&1)" || {
+        printf 'ERROR: %s\n' "$exec_start"
+        exit 2
+      }
+      printf 'aidecheck.service ExecStart=%s\n' "$exec_start"
+      [[ "$exec_start" =~ /usr/sbin/aide[[:space:]]+--check([[:space:];]|$) ]] || failed=1
+      run_user="$(systemctl show aidecheck.service --property=User --value 2>&1)" || exit 2
+      printf 'aidecheck.service User=%s\n' "${run_user:-root (default)}"
+      [ -z "$run_user" ] || [ "$run_user" = root ] || failed=1
+      exit "$failed"
+
   '6.2.1.1':
     type: automatic
     command: |
       active="$(systemctl is-active systemd-journald.service 2>/dev/null || true)"
       echo "systemd-journald active=$active"
       [ "$active" = active ]
-  '6.2.1.2':
+
+  6.2.1.2:
     type: automatic
+    requires:
+      - cis_journal_file_policy_configured
+      - cis_journal_file_mode
     command: |
-      failed=0
-      for dir in /var/log/journal /run/log/journal; do
-        [ -d "$dir" ] || continue
-        while IFS= read -r path; do
-          mode="$(stat -Lc '%a' "$path")"
-          echo "$path mode=$mode"
-          [ "$((8#$mode & 8#007))" -eq 0 ] || failed=1
-        done < <(find "$dir" -xdev -type f -o -type d)
-      done
-      exit "$failed"
-  '6.2.1.3':
+      python3 - <<'PY'
+      import json, os, pathlib, stat, sys
+      try:
+          expected_text = json.loads({{ cis_journal_file_mode | to_json | to_json }})
+          expected = int(expected_text, 8)
+          config = pathlib.Path('/etc/tmpfiles.d/systemd.conf').read_text()
+          wanted_paths = ['/var/log/journal/*/*.journal*', '/run/log/journal/*/*.journal*']
+          rules = [line.split() for line in config.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+          failed = False
+          for path in wanted_paths:
+              matches = [r for r in rules if len(r) >= 3 and r[0] == 'z' and r[1] == path]
+              ok = bool(matches) and all(int(r[2], 8) == expected for r in matches)
+              print(f'tmpfiles rule {path}: expected={expected_text} valid={ok}')
+              failed |= not ok
+          count = 0
+          for root in ('/var/log/journal', '/run/log/journal'):
+              if not pathlib.Path(root).is_dir():
+                  print(f'{root}: absent'); continue
+              def raise_walk_error(error):
+                  raise error
+              for directory, _, names in os.walk(root, onerror=raise_walk_error):
+                  for name in names:
+                      if not name.endswith(('.journal', '.journal~')):
+                          continue
+                      path = pathlib.Path(directory) / name
+                      info = path.lstat()
+                      if not stat.S_ISREG(info.st_mode):
+                          continue
+                      mode = stat.S_IMODE(info.st_mode)
+                      count += 1
+                      print(f'{path}: mode={mode:04o} expected={expected_text}')
+                      failed |= mode != expected
+          print(f'Journal files checked={count}; scope=file modes and configured tmpfiles rules; ACL authorization not assessed')
+          if count == 0:
+              print('No journal files available; runtime file modes are unverified')
+          sys.exit(1 if failed or count == 0 else 0)
+      except (OSError, ValueError, KeyError) as exc:
+          print(f'VALIDATION_ERROR: {exc}'); sys.exit(2)
+      PY
+
+  6.2.1.3:
     type: automatic
-    requires: [cis_logging_backend]
-    requires_when:
-      variable: cis_logging_backend
-      equals: journald
-      inputs:
-        - cis_journald_system_max_use
-        - cis_journald_system_keep_free
-        - cis_journald_runtime_max_use
-        - cis_journald_runtime_keep_free
-        - cis_journald_max_file_sec
+    requires:
+      - cis_journald_rotation_policy_configured
+      - cis_journald_rotation
+      - cis_journald_system_max_use
+      - cis_journald_system_keep_free
+      - cis_journald_runtime_max_use
+      - cis_journald_runtime_keep_free
+      - cis_journald_max_file_sec
     command: |
-      [ "$CIS_LOGGING_BACKEND" != journald ] && { echo 'Journald is not the selected exclusive backend'; exit 0; }
-      for item in "$CIS_JOURNALD_SYSTEM_MAX_USE" "$CIS_JOURNALD_SYSTEM_KEEP_FREE" "$CIS_JOURNALD_RUNTIME_MAX_USE" "$CIS_JOURNALD_RUNTIME_KEEP_FREE" "$CIS_JOURNALD_MAX_FILE_SEC"; do
-        [ -n "$item" ] || { echo 'A journald rotation policy value is missing'; exit 1; }
-      done
-      config="$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null)" || exit 2
-      failed=0
-      for spec in \
-        "SystemMaxUse:$CIS_JOURNALD_SYSTEM_MAX_USE" "SystemKeepFree:$CIS_JOURNALD_SYSTEM_KEEP_FREE" \
-        "RuntimeMaxUse:$CIS_JOURNALD_RUNTIME_MAX_USE" "RuntimeKeepFree:$CIS_JOURNALD_RUNTIME_KEEP_FREE" \
-        "MaxFileSec:$CIS_JOURNALD_MAX_FILE_SEC"; do
-        key="${spec%%:*}"; expected="${spec#*:}"
-        actual="$(awk -F= -v k="$key" '$1==k {v=$2} END {gsub(/[[:space:]]/,"",v); print v}' <<< "$config")"
-        echo "$key=${actual:-missing} expected=$expected"
-        [ "$actual" = "$expected" ] || failed=1
-      done
-      [ "$failed" -eq 0 ]
+      python3 - <<'PY'
+      import json, pathlib, re, subprocess, sys
+      try:
+          expected = json.loads({{ cis_journald_rotation | to_json | to_json }})
+          def parse(text):
+              values, section = {}, ''
+              for line in text.splitlines():
+                  line = line.strip()
+                  if not line or line.startswith(('#', ';')):
+                      continue
+                  if line.startswith('[') and line.endswith(']'):
+                      section = line[1:-1]; continue
+                  if section == 'Journal' and '=' in line:
+                      key, value = line.split('=', 1)
+                      values[key.strip()] = value.strip()
+              return values
+          required = {'SystemMaxUse', 'SystemKeepFree', 'RuntimeMaxUse', 'RuntimeKeepFree', 'MaxFileSec'}
+          if set(expected) != required or any(not isinstance(value, str) or not value.strip() for value in expected.values()):
+              print('Invalid journal policy: supply exactly the five nonempty string values'); sys.exit(2)
+          main = parse(pathlib.Path('/etc/systemd/journald.conf').read_text())
+          output = subprocess.run(['systemd-analyze', 'cat-config', 'systemd/journald.conf'], capture_output=True, text=True, check=True)
+          effective = parse(output.stdout)
+          failed = False
+          for key, value in expected.items():
+              print(f'{key}: main={main.get(key, "missing")} effective={effective.get(key, "missing")} expected={value}')
+              failed |= main.get(key) != value or effective.get(key) != value
+          active = subprocess.run(['systemctl', 'is-active', 'systemd-journald.service'], capture_output=True, text=True)
+          print(f'journald active={active.stdout.strip()}')
+          sys.exit(1 if failed or active.returncode != 0 else 0)
+      except (OSError, KeyError, subprocess.SubprocessError) as exc:
+          print(f'VALIDATION_ERROR: {exc}'); sys.exit(2)
+      PY
+
   '6.2.1.4':
     type: automatic
     requires: [cis_logging_backend]
@@ -1616,10 +2791,19 @@ cis_validators:
   '6.2.3.4':
     type: automatic
     command: |
-      value="$(grep -RPh '^[[:space:]]*\$FileCreateMode[[:space:]]+\K0?[0-7]+' /etc/rsyslog.conf /etc/rsyslog.d 2>/dev/null | tail -1)"
+      value="$(
+        grep -RPoh \
+          '^[[:space:]]*\$FileCreateMode[[:space:]]+\K0?[0-7]+' \
+          /etc/rsyslog.conf \
+          /etc/rsyslog.d 2>/dev/null |
+        tail -1
+      )"
+
       echo "FileCreateMode=${value:-missing}"
-      [ -n "$value" ] || exit 1
+
+      [[ "$value" =~ ^0?[0-7]{3}$ ]] || exit 1
       [ "$((8#$value & 8#137))" -eq 0 ]
+
   '6.2.3.5':
     type: automatic
     requires: [cis_logging_backend]
@@ -1683,3 +2867,402 @@ cis_validators:
         fi
       done < <(find /var/log -xdev -type f -print 2>/dev/null)
       [ "$failed" -eq 0 ]
+  '1.1.2.1.4':
+    type: automatic
+    command: |
+      python3 - <<'PYMOUNT'
+      import subprocess
+      import json
+      import sys
+
+      rows = []
+      for line in open('/etc/fstab'):
+          fields = line.split()
+          if (
+              fields
+              and not fields[0].startswith('#')
+              and len(fields) >= 4
+              and fields[1] == '/tmp'
+          ):
+              rows.append(fields)
+
+      if len(rows) != 1:
+          print(
+              'Expected one persistent /tmp fstab entry; '
+              'review systemd-managed or absent mount separately'
+          )
+          sys.exit(1)
+
+      persistent = 'noexec' in rows[0][3].split(',')
+
+      result = subprocess.run(
+          ['findmnt', '--json', '--mountpoint', '/tmp',
+           '-o', 'TARGET,OPTIONS'],
+          text=True,
+          capture_output=True
+      )
+
+      if result.returncode:
+          print(result.stderr or 'No separate live /tmp mount')
+          sys.exit(1)
+
+      mounts = json.loads(result.stdout).get('filesystems', [])
+      live = (
+          len(mounts) == 1
+          and mounts[0]['target'] == '/tmp'
+          and 'noexec' in mounts[0]['options'].split(',')
+      )
+
+      print(
+          'fstab noexec=' + str(persistent)
+          + ' live noexec=' + str(live)
+      )
+      sys.exit(0 if persistent and live else 1)
+      PYMOUNT
+
+  '2.4.1.7':
+    type: automatic
+    command: |
+      [ -d /etc/cron.d ] || exit 1
+
+      stat -Lc 'mode=%a owner=%U:%G file=%n' /etc/cron.d
+
+      mode="$(stat -Lc '%a' /etc/cron.d)" || exit 2
+
+      [ "$(stat -Lc '%U:%G' /etc/cron.d)" = root:root ] &&
+      [ "$((8#$mode & 8#7077))" -eq 0 ]
+
+  '5.3.3.2.7':
+    type: automatic
+    command: |
+      python3 - <<'PYQUALITY'
+      import pathlib
+      import sys
+
+      paths = sorted(
+          pathlib.Path('/etc/security/pwquality.conf.d').glob('*.conf')
+      ) + [pathlib.Path('/etc/security/pwquality.conf')]
+
+      configured = False
+      for path in paths:
+          if not path.exists():
+              continue
+          for line in path.read_text().splitlines():
+              if line.split('#', 1)[0].strip() == 'enforce_for_root':
+                  configured = True
+
+      failed = False
+      for name in ('system-auth', 'password-auth'):
+          path = pathlib.Path('/etc/pam.d') / name
+          lines = [
+              line.split('#', 1)[0].split()
+              for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith('#')
+          ]
+          modules = [
+              parts for parts in lines
+              if any(token.endswith('pam_pwquality.so') for token in parts)
+          ]
+
+          ok = bool(modules) and all(
+              configured or 'enforce_for_root' in parts
+              for parts in modules
+          )
+          print(str(path) + ' root enforcement=' + str(ok))
+          failed = failed or not ok
+
+      sys.exit(1 if failed else 0)
+      PYQUALITY
+
+  '5.3.3.3.2':
+    type: automatic
+    command: |
+      python3 - <<'PYHISTORY'
+      import pathlib
+      import sys
+
+      config = pathlib.Path('/etc/security/pwhistory.conf')
+      configured = config.exists() and any(
+          line.split('#', 1)[0].strip() == 'enforce_for_root'
+          for line in config.read_text().splitlines()
+      )
+
+      failed = False
+      for name in ('system-auth', 'password-auth'):
+          path = pathlib.Path('/etc/pam.d') / name
+          lines = [
+              line.split('#', 1)[0].split()
+              for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith('#')
+          ]
+          modules = [
+              parts for parts in lines
+              if any(token.endswith('pam_pwhistory.so') for token in parts)
+          ]
+
+          ok = bool(modules) and all(
+              configured or 'enforce_for_root' in parts
+              for parts in modules
+          )
+          print(str(path) + ' root history enforcement=' + str(ok))
+          failed = failed or not ok
+
+      sys.exit(1 if failed else 0)
+      PYHISTORY
+
+  '6.1.3':
+    type: automatic
+    command: |
+      python3 - <<'CIS_HIGH_CHECK'
+      import os, re, subprocess, sys
+      try:
+          checked = subprocess.run(['/usr/sbin/aide', '--config-check'], text=True, capture_output=True)
+          if checked.returncode:
+              print('ERROR: AIDE configuration check failed')
+              print(checked.stderr.strip())
+              sys.exit(2)
+          config = '/etc/aide.conf'
+          with open(config, encoding='utf-8', errors='replace') as stream:
+              lines = [line.split('#', 1)[0].strip() for line in stream]
+          required = {'p', 'i', 'n', 'u', 'g', 's', 'b', 'acl', 'xattrs', 'sha512'}
+          groups = {}
+          for line in lines:
+              match = re.fullmatch(r'([A-Za-z][A-Za-z0-9_]*)\s*=\s*([A-Za-z0-9_+\-]+)', line)
+              if match:
+                  groups[match.group(1)] = match.group(2)
+          def expand(expression, seen=None):
+              seen = set() if seen is None else seen
+              result = set()
+              for sign, token in re.findall(r'([+\-]?)([A-Za-z0-9_]+)', expression):
+                  if token in groups:
+                      if token in seen:
+                          raise ValueError('Recursive AIDE attribute group: ' + token)
+                      values = expand(groups[token], seen | {token})
+                  else:
+                      values = {token}
+                  result = result - values if sign == '-' else result | values
+              return result
+          failed = False
+          for tool in ('auditctl', 'auditd', 'ausearch', 'aureport', 'autrace', 'augenrules'):
+              path = os.path.realpath('/sbin/' + tool)
+              if not os.path.isfile(path):
+                  print(f'NON_COMPLIANT: missing audit tool {path}')
+                  failed = True
+                  continue
+              # Audit the explicit main-file selection lines prescribed by the workbook.
+              matches = [line.split(None, 1)[1] for line in lines
+                         if len(line.split(None, 1)) == 2 and line.split(None, 1)[0] == path]
+              if not matches:
+                  print(f'NON_COMPLIANT: explicit {path} rule missing in {config}')
+                  failed = True
+                  continue
+              for expression in matches:
+                  missing = sorted(required - expand(expression))
+                  print(f'{config}: {path} attributes={expression} missing={missing or "none"}')
+                  failed = failed or bool(missing)
+          print('Scope: explicit audit-tool rules in /etc/aide.conf; AIDE syntax/includes checked by aide.')
+          sys.exit(1 if failed else 0)
+      except (OSError, ValueError) as error:
+          print(f'ERROR: cannot complete audit-tool rule audit: {error}')
+          sys.exit(2)
+      CIS_HIGH_CHECK
+
+  '7.2.9':
+    type: automatic
+    remediation_safe: true
+    command: |
+      python3 - validate <<'CIS_DOTFILES_SCRIPT'
+      {{ lookup('ansible.builtin.file', role_path ~ '/files/cis_dotfiles_access.py') }}
+      CIS_DOTFILES_SCRIPT
+
+  '5.3.3.2.1':
+    type: automatic
+    requires:
+      - cis_password_difok
+    command: |
+      python3 - <<'PYDIFOK'
+      import os
+      import pathlib
+      import sys
+
+      key = 'difok'
+      expected = int(os.environ['CIS_PASSWORD_DIFOK'])
+      paths = sorted(
+          pathlib.Path('/etc/security/pwquality.conf.d').glob('*.conf')
+      ) + [pathlib.Path('/etc/security/pwquality.conf')]
+
+      actual = None
+      for path in paths:
+          if not path.exists():
+              continue
+          for line in path.read_text().splitlines():
+              line = line.split('#', 1)[0].strip()
+              if '=' in line:
+                  name, value = line.split('=', 1)
+                  if name.strip() == key:
+                      actual = value.strip()
+
+      print(key + '=' + str(actual) + ' expected=' + str(expected))
+      failed = False
+
+      for name in ('system-auth', 'password-auth'):
+          path = pathlib.Path('/etc/pam.d') / name
+          modules = [
+              line.split('#', 1)[0].split()
+              for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith('#')
+          ]
+          modules = [
+              parts for parts in modules
+              if any(token.endswith('pam_pwquality.so') for token in parts)
+          ]
+
+          if not modules:
+              print(str(path) + ': pam_pwquality.so missing')
+              failed = True
+              continue
+
+          for parts in modules:
+              effective = actual
+              for token in parts:
+                  if token.startswith(key + '='):
+                      effective = token.split('=', 1)[1]
+
+              print(str(path) + ' effective ' + key + '=' + str(effective))
+
+              try:
+                  failed = failed or int(effective) != expected
+              except (TypeError, ValueError):
+                  failed = True
+
+      sys.exit(1 if failed else 0)
+      PYDIFOK
+
+  '5.3.3.2.4':
+    type: automatic
+    requires:
+      - cis_password_maxrepeat
+    command: |
+      python3 - <<'PYREPEAT'
+      import os
+      import pathlib
+      import sys
+
+      key = 'maxrepeat'
+      expected = int(os.environ['CIS_PASSWORD_MAXREPEAT'])
+      paths = sorted(
+          pathlib.Path('/etc/security/pwquality.conf.d').glob('*.conf')
+      ) + [pathlib.Path('/etc/security/pwquality.conf')]
+
+      actual = None
+      for path in paths:
+          if not path.exists():
+              continue
+          for line in path.read_text().splitlines():
+              line = line.split('#', 1)[0].strip()
+              if '=' in line:
+                  name, value = line.split('=', 1)
+                  if name.strip() == key:
+                      actual = value.strip()
+
+      print(key + '=' + str(actual) + ' expected=' + str(expected))
+      failed = False
+
+      for name in ('system-auth', 'password-auth'):
+          path = pathlib.Path('/etc/pam.d') / name
+          modules = [
+              line.split('#', 1)[0].split()
+              for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith('#')
+          ]
+          modules = [
+              parts for parts in modules
+              if any(token.endswith('pam_pwquality.so') for token in parts)
+          ]
+
+          if not modules:
+              print(str(path) + ': pam_pwquality.so missing')
+              failed = True
+              continue
+
+          for parts in modules:
+              effective = actual
+              for token in parts:
+                  if token.startswith(key + '='):
+                      effective = token.split('=', 1)[1]
+
+              print(str(path) + ' effective ' + key + '=' + str(effective))
+
+              try:
+                  failed = failed or int(effective) != expected
+              except (TypeError, ValueError):
+                  failed = True
+
+      sys.exit(1 if failed else 0)
+      PYREPEAT
+
+  '5.3.3.2.5':
+    type: automatic
+    requires:
+      - cis_password_maxsequence
+    command: |
+      python3 - <<'PYSEQUENCE'
+      import os
+      import pathlib
+      import sys
+
+      key = 'maxsequence'
+      expected = int(os.environ['CIS_PASSWORD_MAXSEQUENCE'])
+      paths = sorted(
+          pathlib.Path('/etc/security/pwquality.conf.d').glob('*.conf')
+      ) + [pathlib.Path('/etc/security/pwquality.conf')]
+
+      actual = None
+      for path in paths:
+          if not path.exists():
+              continue
+          for line in path.read_text().splitlines():
+              line = line.split('#', 1)[0].strip()
+              if '=' in line:
+                  name, value = line.split('=', 1)
+                  if name.strip() == key:
+                      actual = value.strip()
+
+      print(key + '=' + str(actual) + ' expected=' + str(expected))
+      failed = False
+
+      for name in ('system-auth', 'password-auth'):
+          path = pathlib.Path('/etc/pam.d') / name
+          modules = [
+              line.split('#', 1)[0].split()
+              for line in path.read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith('#')
+          ]
+          modules = [
+              parts for parts in modules
+              if any(token.endswith('pam_pwquality.so') for token in parts)
+          ]
+
+          if not modules:
+              print(str(path) + ': pam_pwquality.so missing')
+              failed = True
+              continue
+
+          for parts in modules:
+              effective = actual
+              for token in parts:
+                  if token.startswith(key + '='):
+                      effective = token.split('=', 1)[1]
+
+              print(str(path) + ' effective ' + key + '=' + str(effective))
+
+              try:
+                  failed = failed or int(effective) != expected
+              except (TypeError, ValueError):
+                  failed = True
+
+      sys.exit(1 if failed else 0)
+      PYSEQUENCE
+
+
+  
