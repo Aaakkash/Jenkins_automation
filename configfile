@@ -1,0 +1,183 @@
+---
+# Cleaned single site-input configuration for the three requested controls.
+# Duplicate definitions removed; the previous effective (last) values were retained.
+# Existing bootloader values are preserved. Encrypt this file as in your current setup.
+# cis_journald_rotation is authoritative; scalar aliases below agree with it.
+# cis_requested_control_ids limits this run; use [] later for normal phase selection.
+# Incomplete policy values for other controls are retained for review, not guessed.
+rhel9cis_bootloader_password: 
+cis_root_bin_action: create
+grub_pbkdf2_hash: 
+cis_backup_root: /var/backups/rhel9-cis
+cis_reboot_allowed: false
+cis_remediation_skip_ids: 
+  - 4.3.2
+  - 4.3.1
+  - 4.3.3
+  
+cis_excluded_control_ids:
+  - 2.1.6
+  - 2.1.12
+  - 4.1.2
+  - 4.3.4
+  - 5.2.7
+  - 5.4.1.1
+  - 5.4.1.5
+  - 5.4.2.2
+  - 5.4.2.3
+  - 7.2.5
+  - 7.1.12
+  - 5.4.2.7
+  - 6.2.2.1.1
+  - 6.2.2.1.3
+  - 6.2.2.2
+  - 6.2.2.3
+  - 6.2.2.4
+  - 1.2.2.1
+cis_exclusion_approved_by: Unix Team
+cis_exclusion_reference: Unix Team
+cis_exclusion_reason: Controls excluded from the RHEL 9 CIS remediation scope based on the formal Unix team decision.
+cis_required_filesystems: []
+cis_unused_filesystem_modules:
+  - cramfs
+  - freevxfs
+  - hfs
+  - hfsplus
+  - jffs2
+  - squashfs
+  - udf
+cis_approved_gpg_key_fingerprints: []
+cis_approved_repositories:
+  - packages-microsoft-com-prod
+  - rhel-9-for-x86_64-appstream-rpms
+  - rhel-9-for-x86_64-baseos-rpms
+cis_repository_policy_configured: true
+cis_package_updates_allowed: false
+cis_motd_banner_text: |-
+  ************************************************
+  *This system is for authorized users only. Any *
+  *unauthorized access attempts will be logged,  *
+  *and offenders will be prosecuted!             *
+  *                                              *
+  * You have been warned!                        *
+  *                                              *
+  *Thank You,                                    *
+  *The Management                                *
+  ************************************************
+cis_local_login_banner_text: |-
+  Authorized uses only.
+  All activity may be monitored and reported.
+
+cis_remote_login_banner_text: |-
+  ************************************************
+  *This system is for authorized users only. Any *
+  *unauthorized access attempts will be logged,  *
+  *and offenders will be prosecuted!             *
+  *                                              *
+  * You have been warned!                        *
+  *                                              *
+  *Thank You,                                    *
+  *The Management                                *
+  ************************************************
+cis_gdm_login_banner_text: |-
+  ************************************************
+  *This system is for authorized users only. Any *
+  *unauthorized access attempts will be logged,  *
+  *and offenders will be prosecuted!             *
+  *                                              *
+  * You have been warned!                        *
+  *                                              *
+  *Thank You,                                    *
+  *The Management                                *
+  ************************************************
+cis_gdm_scope: server_without_gdm
+cis_approved_listening_services:
+  - tcp:22
+  - tcp:25
+  - tcp:111
+  - tcp:139
+  - tcp:445
+  - tcp:1270
+  - udp:111
+  - udp:323
+cis_approved_firewalld_services: []
+cis_approved_firewalld_ports: []
+cis_chrony_sources:
+  - name: 10.0.0.2
+    options:
+      - minpoll 8
+      - iburst
+cis_ipv6_policy: enabled
+cis_ipv6_disable_method: kernel
+cis_firewall_backend: disabled
+cis_nftables_policy_configured: false
+cis_nftables_management_sources: []
+cis_nftables_management_ipv6_sources: []
+cis_nftables_management_tcp_ports:
+  - 22
+cis_nftables_allowed_tcp_ports: []
+cis_nftables_allowed_udp_ports: []
+cis_passwd_warn_days: 7
+cis_nftables_additional_input_rules: []
+cis_nftables_allow_icmp: true
+cis_ssh_legacy_client_exception: false
+cis_ssh_access_policy_configured: false
+cis_ssh_allowed_users: []
+cis_ssh_allowed_groups: []
+cis_ssh_denied_users: []
+cis_ssh_denied_groups: []
+cis_ssh_client_alive_interval: 15
+cis_ssh_client_alive_count_max: 3
+cis_sudo_log_file: /var/log/sudo.log
+cis_password_failed_attempts: 5
+cis_password_unlock_time: 900
+cis_password_min_length: 14
+cis_password_min_classes: 4
+cis_password_history: 24
+cis_password_warning_days: 7
+cis_shell_timeout: 900
+cis_logging_backend: rsyslog
+cis_journald_system_max_use: 1G
+cis_journald_system_keep_free: 500M
+cis_journald_runtime_max_use: 200M
+cis_journald_runtime_keep_free: 50M
+cis_journald_max_file_sec: 1month
+cis_journald_rotation:
+  SystemMaxUse: 1G
+  SystemKeepFree: 500M
+  RuntimeMaxUse: 200M
+  RuntimeKeepFree: 50M
+  MaxFileSec: 1month
+cis_journal_upload_enabled: false
+cis_journal_upload_policy_configured: true
+cis_journal_upload_url: ''
+cis_journal_upload_server_key_file: ''
+cis_journal_upload_server_certificate_file: ''
+cis_journal_upload_trusted_certificate_file: ''
+cis_rsyslog_required_routes: []
+cis_rsyslog_policy_configured: false
+cis_remote_log_host: ''
+cis_remote_log_port: 514
+cis_remote_log_protocol: tcp
+cis_rsyslog_rotation_frequency: daily
+cis_rsyslog_rotation_count: 4
+cis_application_log_exceptions: []
+cis_log_file_policy_configured: false
+cis_approved_world_writable_paths: []
+cis_approved_unowned_paths: []
+cis_approved_suid_sgid_paths: []
+cis_local_interactive_users: []
+cis_filesystem_review_completed: true
+cis_privileged_file_inventory_completed: false
+cis_interactive_user_review_completed: true
+cis_authselect_custom_profile: cis-hardening
+cis_aide_cron_hour: '5'
+cis_aide_cron_minute: '0'
+cis_unowned_path_ownership: []
+cis_journal_file_policy_configured: true
+cis_journal_file_mode: '0640'
+cis_journald_rotation_policy_configured: true
+cis_requested_control_ids: []
+cis_password_difok: 2
+cis_password_maxrepeat: 3
+cis_password_maxsequence: 3
