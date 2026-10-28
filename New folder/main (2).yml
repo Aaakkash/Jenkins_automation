@@ -309,6 +309,11 @@
         remediation_attempted: []
   tags:
   - always
+- name: Initialize original-file backups for this role execution
+  ansible.builtin.set_fact:
+    cis_run_file_backups: []
+  tags:
+  - always
 - name: Run remediation workflow
   when:
   - cis_operation == 'remediate'
