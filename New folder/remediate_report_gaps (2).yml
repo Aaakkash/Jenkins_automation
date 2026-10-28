@@ -1,4 +1,3 @@
----
 - name: Track current remediation control
   ansible.builtin.set_fact:
     cis_active_remediation_control_id: '{{ cis_remediation_control_id }}'
@@ -7,11 +6,370 @@
   - name: Enforce site firewall policy at remediation dispatch
     ansible.builtin.assert:
       that:
-        - >-
-          cis_firewall_backend not in ['disabled', 'review'] or
-          ((cis_custom_remediation_ids + cis_collection_remediation_ids)
-           | select('match', '^4[.]') | list | length == 0)
+      - |-
+        cis_firewall_backend not in ['disabled', 'review'] or ((cis_custom_remediation_ids + cis_collection_remediation_ids)
+         | select('match', '^4[.]') | list | length == 0)
       fail_msg: Firewall controls cannot be remediated while the site backend is disabled or under review.
+  - name: Plan existing files for selected remediation backups
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import collections,glob,json,os,pathlib,stat,subprocess,sys
+        try:
+            custom_ids=json.loads(os.environ['CIS_BACKUP_CUSTOM_IDS'])
+            collection_ids=json.loads(os.environ['CIS_BACKUP_COLLECTION_IDS'])
+            config=json.loads(os.environ['CIS_BACKUP_CONFIG'])
+            maps={
+                'collection': {
+                    '1.1.1.1': ['/etc/modprobe.d/cramfs.conf'],
+                    '1.1.1.2': ['/etc/modprobe.d/freevxfs.conf'],
+                    '1.1.1.3': ['/etc/modprobe.d/hfs.conf'],
+                    '1.1.1.4': ['/etc/modprobe.d/hfsplus.conf'],
+                    '1.1.1.5': ['/etc/modprobe.d/jffs2.conf'],
+                    '1.1.1.6': ['/etc/modprobe.d/squashfs.conf'],
+                    '1.1.1.7': ['/etc/modprobe.d/udf.conf'],
+                    '1.1.1.8': ['/etc/modprobe.d/usb-storage.conf'],
+                    '1.1.1.9': ['/etc/modprobe.d/afs.conf', '/etc/modprobe.d/ceph.conf', '/etc/modprobe.d/cifs.conf', '/etc/modprobe.d/exfat.conf', '/etc/modprobe.d/ext.conf', '/etc/modprobe.d/fat.conf', '/etc/modprobe.d/fscache.conf', '/etc/modprobe.d/fuse.conf', '/etc/modprobe.d/gfs2.conf', '/etc/modprobe.d/nfs_common.conf', '/etc/modprobe.d/nfsd.conf', '/etc/modprobe.d/smbfs_common.conf'],
+                    '1.1.2.1.1': ['/etc/fstab'],
+                    '1.1.2.1.2': ['/etc/fstab'],
+                    '1.1.2.1.3': ['/etc/fstab'],
+                    '1.1.2.1.4': ['/etc/fstab'],
+                    '1.1.2.2.1': ['/etc/fstab'],
+                    '1.1.2.2.2': ['/etc/fstab'],
+                    '1.1.2.2.3': ['/etc/fstab'],
+                    '1.1.2.2.4': ['/etc/fstab'],
+                    '1.1.2.3.1': ['/etc/fstab'],
+                    '1.1.2.3.2': ['/etc/fstab'],
+                    '1.1.2.3.3': ['/etc/fstab'],
+                    '1.1.2.4.1': ['/etc/fstab'],
+                    '1.1.2.4.2': ['/etc/fstab'],
+                    '1.1.2.4.3': ['/etc/fstab'],
+                    '1.1.2.5.1': ['/etc/fstab'],
+                    '1.1.2.5.2': ['/etc/fstab'],
+                    '1.1.2.5.3': ['/etc/fstab'],
+                    '1.1.2.5.4': ['/etc/fstab'],
+                    '1.1.2.6.1': ['/etc/fstab'],
+                    '1.1.2.6.2': ['/etc/fstab'],
+                    '1.1.2.6.3': ['/etc/fstab'],
+                    '1.1.2.6.4': ['/etc/fstab'],
+                    '1.1.2.7.1': ['/etc/fstab'],
+                    '1.1.2.7.2': ['/etc/fstab'],
+                    '1.1.2.7.3': ['/etc/fstab'],
+                    '1.1.2.7.4': ['/etc/fstab'],
+                    '1.2.1.2': ['/etc/dnf/dnf.conf', '/etc/yum.repos.d/**/*.repo'],
+                    '1.2.1.3': ['/etc/dnf/dnf.conf', '/etc/yum.repos.d/**/*.repo'],
+                    '1.3.1.2': ['/boot/efi/EFI/*/grub.cfg', '/boot/efi/EFI/*/grubenv', '/boot/grub2/grub.cfg', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
+                    '1.3.1.3': ['/etc/selinux/config'],
+                    '1.3.1.4': ['/etc/selinux/config'],
+                    '1.3.1.5': ['/etc/selinux/config'],
+                    '1.4.2': ['/boot/efi/EFI/**/*', '/boot/grub2/**/*'],
+                    '1.5.1': ['/etc/sysctl.conf'],
+                    '1.5.2': ['/etc/sysctl.conf'],
+                    '1.5.3': ['/etc/systemd/coredump.conf'],
+                    '1.5.4': ['/etc/systemd/coredump.conf'],
+                    '1.6.1': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/state/**/*'],
+                    '1.6.2': ['/etc/sysconfig/sshd'],
+                    '1.6.3': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SHA1.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.4': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-WEAKMAC.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.5': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHCBC.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.6': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHCHACHA20.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.7': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHETM.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.7.1': ['/etc/motd'],
+                    '1.7.2': ['/etc/issue'],
+                    '1.7.3': ['/etc/issue.net'],
+                    '1.7.4': ['/etc/motd'],
+                    '1.7.5': ['/etc/issue'],
+                    '1.7.6': ['/etc/issue.net'],
+                    '2.1.21': ['/etc/postfix/main.cf'],
+                    '2.3.2': ['/etc/chrony.conf'],
+                    '2.3.3': ['/etc/sysconfig/chronyd'],
+                    '2.4.1.2': ['/etc/crontab'],
+                    '2.4.1.3': ['/etc/cron.hourly'],
+                    '2.4.1.4': ['/etc/cron.daily'],
+                    '2.4.1.5': ['/etc/cron.weekly'],
+                    '2.4.1.6': ['/etc/cron.monthly'],
+                    '2.4.1.7': ['/etc/cron.d'],
+                    '2.4.1.8': ['/etc/cron.allow', '/etc/cron.deny'],
+                    '2.4.2.1': ['/etc/at.allow', '/etc/at.deny'],
+                    '3.1.1': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/sysctl.conf'],
+                    '3.1.2': ['/var/lib/NetworkManager/NetworkManager.state'],
+                    '3.2.1': ['/etc/modprobe.d/dccp.conf'],
+                    '3.2.2': ['/etc/modprobe.d/tipc.conf'],
+                    '3.2.3': ['/etc/modprobe.d/rds.conf'],
+                    '3.2.4': ['/etc/modprobe.d/sctp.conf'],
+                    '3.3.1': ['/etc/sysctl.conf'],
+                    '3.3.10': ['/etc/sysctl.conf'],
+                    '3.3.11': ['/etc/sysctl.conf'],
+                    '3.3.2': ['/etc/sysctl.conf'],
+                    '3.3.3': ['/etc/sysctl.conf'],
+                    '3.3.4': ['/etc/sysctl.conf'],
+                    '3.3.5': ['/etc/sysctl.conf'],
+                    '3.3.6': ['/etc/sysctl.conf'],
+                    '3.3.7': ['/etc/sysctl.conf'],
+                    '3.3.8': ['/etc/sysctl.conf'],
+                    '3.3.9': ['/etc/sysctl.conf'],
+                    '4.2.2': ['/etc/firewalld/**/*.xml'],
+                    '5.1.1': ['/etc/ssh/sshd_config', '/etc/ssh/sshd_config.d/*.conf'],
+                    '5.1.10': ['/etc/ssh/sshd_config'],
+                    '5.1.11': ['/etc/ssh/sshd_config'],
+                    '5.1.12': ['/etc/ssh/sshd_config'],
+                    '5.1.13': ['/etc/ssh/sshd_config'],
+                    '5.1.14': ['/etc/ssh/sshd_config'],
+                    '5.1.15': ['/etc/ssh/sshd_config'],
+                    '5.1.16': ['/etc/ssh/sshd_config'],
+                    '5.1.17': ['/etc/ssh/sshd_config'],
+                    '5.1.18': ['/etc/ssh/sshd_config'],
+                    '5.1.19': ['/etc/ssh/sshd_config'],
+                    '5.1.2': ['/etc/ssh/**/ssh_host_*_key'],
+                    '5.1.20': ['/etc/ssh/sshd_config'],
+                    '5.1.21': ['/etc/ssh/sshd_config'],
+                    '5.1.22': ['/etc/ssh/sshd_config'],
+                    '5.1.3': ['/etc/ssh/**/ssh_host_*_key.pub'],
+                    '5.1.7': ['/etc/ssh/sshd_config'],
+                    '5.1.8': ['/etc/ssh/sshd_config'],
+                    '5.1.9': ['/etc/ssh/sshd_config'],
+                    '5.2.2': ['/etc/sudoers'],
+                    '5.2.3': ['/etc/sudoers'],
+                    '5.2.4': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
+                    '5.2.5': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
+                    '5.2.6': ['/etc/sudoers'],
+                    '5.2.7': ['/etc/group', '/etc/gshadow', '/etc/pam.d/su'],
+                    '5.3.3.1.1': ['/etc/security/faillock.conf'],
+                    '5.3.3.1.2': ['/etc/security/faillock.conf'],
+                    '5.3.3.1.3': ['/etc/security/faillock.conf'],
+                    '5.3.3.2.1': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.2': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.3': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.4': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.5': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.6': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.7': ['/etc/security/pwquality.conf'],
+                    '5.3.3.3.1': ['/etc/security/pwhistory.conf'],
+                    '5.3.3.3.2': ['/etc/security/pwhistory.conf'],
+                    '5.4.1.1': ['/etc/login.defs'],
+                    '5.4.1.2': ['/etc/login.defs'],
+                    '5.4.1.3': ['/etc/login.defs'],
+                    '5.4.1.4': ['/etc/libuser.conf', '/etc/login.defs'],
+                    '5.4.1.5': ['/etc/default/useradd'],
+                    '5.4.2.6': ['/root/.bash_profile'],
+                    '5.4.2.7': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '5.4.2.8': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '5.4.3.1': ['/etc/shells'],
+                    '5.4.3.2': ['/etc/profile.d/timeout.sh'],
+                    '5.4.3.3': ['/etc/profile.d/umask.sh'],
+                    '6.1.1': ['/etc/logrotate.d/aide', '/var/lib/aide/aide.db.gz', '/var/lib/aide/aide.db.new.gz'],
+                    '6.1.2': ['/etc/cron.d/*', '/var/spool/cron/root'],
+                    '6.1.3': ['/etc/aide.conf'],
+                    '6.2.1.2': ['/etc/tmpfiles.d/systemd.conf', '/usr/lib/tmpfiles.d/systemd.conf'],
+                    '6.2.1.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.1.2': ['/etc/systemd/journal-upload.conf'],
+                    '6.2.2.2': ['/etc/systemd/journald.conf'],
+                    '6.2.2.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.4': ['/etc/systemd/journald.conf'],
+                    '6.2.3.3': ['/etc/systemd/journald.conf'],
+                    '6.2.3.4': ['/etc/rsyslog.conf'],
+                    '6.2.3.6': ['/etc/rsyslog.conf'],
+                    '6.2.3.7': ['/etc/rsyslog.conf'],
+                    '6.2.3.8': ['/etc/logrotate.conf', '/etc/logrotate.d/**/*'],
+                    '6.2.4.1': ['/var/log/**/*'],
+                    '6.3.1.2': ['/boot/efi/EFI/*/grub.cfg', '/boot/grub2/grub.cfg', '/etc/default/grub'],
+                    '6.3.1.3': ['/boot/efi/EFI/*/grub.cfg', '/boot/grub2/grub.cfg', '/etc/default/grub'],
+                    '6.3.2.1': ['/etc/audit/auditd.conf'],
+                    '6.3.2.2': ['/etc/audit/auditd.conf'],
+                    '6.3.2.3': ['/etc/audit/auditd.conf'],
+                    '6.3.3.1': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.10': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.11': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.12': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.13': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.14': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.15': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.16': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.17': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.18': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.19': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.2': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.20': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.3': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.4': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.5': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.6': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.7': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.8': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.9': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.4.1': ['/var/log/audit'],
+                    '6.3.4.10': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '6.3.4.2': ['/var/log/audit/**/*'],
+                    '6.3.4.3': ['/var/log/audit/**/*'],
+                    '6.3.4.4': ['/var/log/audit/**/*'],
+                    '6.3.4.5': ['/etc/audit/**/*'],
+                    '6.3.4.6': ['/etc/audit/**/*'],
+                    '6.3.4.7': ['/etc/audit/**/*'],
+                    '6.3.4.8': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '6.3.4.9': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '7.1.1': ['/etc/passwd'],
+                    '7.1.10': ['/etc/shells'],
+                    '7.1.11': [],
+                    '7.1.2': ['/etc/passwd-'],
+                    '7.1.3': ['/etc/security/opasswd', '/etc/security/opasswd.old'],
+                    '7.1.4': ['/etc/group'],
+                    '7.1.5': ['/etc/group-'],
+                    '7.1.6': ['/etc/shadow'],
+                    '7.1.7': ['/etc/shadow-'],
+                    '7.1.8': ['/etc/gshadow'],
+                    '7.1.9': ['/etc/gshadow-'],
+                    '7.2.1': ['/etc/passwd'],
+                    '7.2.2': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '7.2.8': [],
+                    '7.2.9': [],
+                },
+                'custom': {
+                    '1.1.1.9': ['/etc/modprobe.d/cis-unused-filesystems.conf'],
+                    '1.1.2.1.4': ['/etc/fstab'],
+                    '1.3.1.2': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
+                    '1.4.1': ['/boot/grub2/user.cfg'],
+                    '1.4.2': ['/boot/efi/EFI/**/grub*', '/boot/grub2/grub*', '/boot/grub2/user.cfg'],
+                    '1.7.3': ['/etc/issue.net'],
+                    '2.4.1.7': ['/etc/cron.d'],
+                    '2.4.1.8': ['/etc/cron.allow', '/etc/cron.deny'],
+                    '3.1.1': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf'],
+                    '4.1.1': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.1': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.2': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.3': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '5.1.9': ['/etc/ssh/sshd_config'],
+                    '5.3.3.2.1': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.4': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.5': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.7': ['/etc/security/pwquality.conf'],
+                    '5.3.3.3.2': ['/etc/security/pwhistory.conf'],
+                    '5.3.3.3.3': [],
+                    '5.3.3.4.1': [],
+                    '5.4.1.3': ['/etc/login.defs', '/etc/shadow'],
+                    '5.4.2.5': ['/root/bin'],
+                    '6.1.2': ['/etc/cron.d/*', '/etc/crontab', '/etc/systemd/system/aidecheck.service', '/etc/systemd/system/aidecheck.timer', '/var/spool/cron/root'],
+                    '6.1.3': ['/etc/aide.conf'],
+                    '6.2.1.2': ['/etc/tmpfiles.d/systemd.conf', '/run/log/journal/**/*.journal', '/run/log/journal/**/*.journal~', '/var/log/journal/**/*.journal', '/var/log/journal/**/*.journal~'],
+                    '6.2.1.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.1.2': ['/etc/systemd/journal-upload.conf.d', '/etc/systemd/journal-upload.conf.d/60-cis-auth.conf'],
+                    '6.2.3.8': ['/etc/logrotate.d/rsyslog'],
+                    '7.1.11': [],
+                    '7.1.12': [],
+                },
+            }
+            selected=set(custom_ids+collection_ids)
+            targets=collections.defaultdict(set);aliases=collections.defaultdict(set)
+            def add(path,control):
+                if not os.path.isabs(path):raise ValueError('Backup target must be absolute: '+path)
+                name=os.path.basename(path)
+                if name.startswith(('backup_CIS_remediation_','.cis_prechange_')) or '-backup_CIS_remediation_' in name:return
+                # Back up the real file beside its physical target, never a directory or device.
+                alias=path;path=os.path.realpath(path)
+                try:info=os.stat(path)
+                except FileNotFoundError:return
+                if stat.S_ISREG(info.st_mode):
+                    targets[path].add(control);aliases[path].add(alias)
+            def patterns(values,control):
+                for pattern in values:
+                    for path in glob.glob(pattern,recursive=True):add(path,control)
+            for kind,ids in [('custom',custom_ids),('collection',collection_ids)]:
+                for control in ids:patterns(maps[kind].get(control,[]),control)
+            pam={'5.3.2.1','5.3.2.2','5.3.2.4','5.3.3.3.3','5.3.3.4.1'} & selected
+            if pam:
+                result=subprocess.run(['authselect','current','--raw'],capture_output=True,text=True,timeout=30)
+                if result.returncode:raise ValueError('Cannot identify active authselect profile for backup: '+result.stderr.strip())
+                tokens=result.stdout.split()
+                if not tokens:raise ValueError('No active authselect profile returned for backup')
+                profile=tokens[0]
+                if '/' in profile and not profile.startswith('custom/'):raise ValueError('Unsupported authselect profile path')
+                if '..' in profile or profile.startswith('/'):raise ValueError('Unsafe authselect profile path')
+                files=['/etc/authselect/authselect.conf','/etc/authselect/system-auth','/etc/authselect/password-auth',
+                       '/etc/authselect/fingerprint-auth','/etc/authselect/smartcard-auth','/etc/authselect/postlogin',
+                       '/etc/authselect/nsswitch.conf','/etc/authselect/user-nsswitch.conf',
+                       '/etc/authselect/dconf-db','/etc/authselect/dconf-locks','/etc/nsswitch.conf',
+                       '/etc/pam.d/system-auth','/etc/pam.d/password-auth','/etc/pam.d/fingerprint-auth',
+                       '/etc/pam.d/smartcard-auth','/etc/pam.d/postlogin',
+                       '/etc/dconf/db/distro','/etc/dconf/db/distro.d/20-authselect',
+                       '/etc/dconf/db/distro.d/locks/20-authselect']
+                if profile.startswith('custom/'):
+                    files += ['/etc/authselect/'+profile+'/system-auth','/etc/authselect/'+profile+'/password-auth']
+                for control in pam:patterns(files,control)
+            if '1.2.1.4' in custom_ids:
+                for repository in config.get('repositories',[]):
+                    add('/etc/yum.repos.d/'+repository['id']+'.repo','1.2.1.4')
+            if '6.1.2' in collection_ids:
+                cron=config.get('aide_cron_file','aide')
+                add(cron if cron.startswith('/') else '/etc/cron.d/'+cron,'6.1.2')
+            if '7.1.12' in custom_ids:
+                for entry in config.get('unowned_paths',[]):
+                    path=entry['path'];add(path,'7.1.12')
+                    if entry.get('recurse') and os.path.isdir(path):
+                        for directory,dirs,files in os.walk(path,followlinks=False):
+                            dirs[:]=[d for d in dirs if not d.startswith('.cis_prechange_')]
+                            for name in files:add(os.path.join(directory,name),'7.1.12')
+            if '7.2.9' in selected:
+                shells={line.strip() for line in pathlib.Path('/etc/shells').read_text().splitlines()
+                        if line.startswith('/') and os.path.basename(line.strip())!='nologin'}
+                for line in pathlib.Path('/etc/passwd').read_text().splitlines():
+                    fields=line.split(':')
+                    if len(fields)!=7 or fields[6] not in shells or not os.path.isdir(fields[5]):continue
+                    home=fields[5];device=os.stat(home).st_dev
+                    def walk_error(error):raise error
+                    for directory,dirs,files in os.walk(home,followlinks=False,onerror=walk_error):
+                        dirs[:]=[d for d in dirs if os.lstat(os.path.join(directory,d)).st_dev==device]
+                        for name in files:
+                            path=os.path.join(directory,name)
+                            if name.startswith('.') and not os.path.islink(path):add(path,'7.2.9')
+            if '7.1.11' in selected:
+                roots=['/']
+                if '7.1.11' in custom_ids:
+                    result=subprocess.run(['findmnt','-rn','-t','ext2,ext3,ext4,xfs,btrfs','-o','TARGET'],capture_output=True,text=True)
+                    if result.returncode:raise ValueError('Cannot discover local mounts for file backups')
+                    roots=result.stdout.splitlines()
+                for base in roots:
+                    result=subprocess.run(['find',base,'-xdev','-type','f','-perm','-0002','-print0'],capture_output=True)
+                    if result.returncode:raise ValueError('Cannot identify world-writable files for backup: '+os.fsdecode(result.stderr))
+                    for path in result.stdout.split(b'\0'):
+                        if path:add(os.fsdecode(path),'7.1.11')
+            # Optional site-specific configuration paths, without modifying the collection.
+            for control,paths in config.get('extra_paths',{}).items():
+                if control in selected:patterns(paths,control)
+            print(json.dumps([{'path':path,'control_ids':sorted(ids),'aliases':sorted(aliases[path])} for path,ids in sorted(targets.items())]))
+        except (OSError,ValueError,subprocess.TimeoutExpired) as error:
+            print('Cannot plan pre-remediation file backups: '+str(error),file=sys.stderr)
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_CUSTOM_IDS: '{{ cis_custom_remediation_ids | default([]) | to_json }}'
+      CIS_BACKUP_COLLECTION_IDS: '{{ cis_collection_remediation_ids | default([]) | to_json }}'
+      CIS_BACKUP_CONFIG: '{{ {''unowned_paths'': cis_unowned_path_ownership | default([]), ''aide_cron_file'': rhel9cis_aide_cron_file
+        | default(''aide''), ''repositories'': cis_repository_definitions | default([]), ''extra_paths'': cis_backup_extra_paths_by_control
+        | default({})} | to_json }}'
+    register: cis_prechange_backup_plan
+    changed_when: false
+    check_mode: false
+  - name: Set timestamp for same-folder remediation backups
+    ansible.builtin.set_fact:
+      cis_prechange_backup_timestamp: '{{ now(utc=true, fmt=''%Y%m%dT%H%M%S%fZ'') }}'
+  - name: Back up selected existing remediation files in their own folders
+    become: true
+    ansible.builtin.copy:
+      src: '{{ item.path }}'
+      dest: '{{ item.path | dirname }}/backup_CIS_remediation_{{ item.path | basename }}_{{ cis_prechange_backup_timestamp
+        }}.bak'
+      remote_src: true
+      owner: root
+      group: root
+      mode: '0600'
+      backup: false
+    loop: '{{ cis_prechange_backup_plan.stdout | from_json }}'
+    loop_control:
+      label: '{{ item.control_ids | join('', '') }} | {{ item.path }}'
+    when: not ansible_check_mode
+    tags:
+    - cis_prechange_backup
   - name: Load collection rule reset values
     ansible.builtin.include_vars:
       file: '{{ role_path }}/vars/disable_all.yml'
@@ -54,7 +412,8 @@
         - cis_grub2_setpassword_command.stat.executable
         - cis_grub2_directory.stat.exists
         - cis_grub2_directory.stat.isdir
-        fail_msg: /usr/sbin/grub2-setpassword or /boot/grub2 is unavailable. Confirm that the RHEL 9 GRUB tools are installed.
+        fail_msg: /usr/sbin/grub2-setpassword or /boot/grub2 is unavailable. Confirm that the RHEL 9 GRUB tools
+          are installed.
     - name: 1.4.1 | Generate GRUB PBKDF2 password in canonical directory
       ansible.builtin.expect:
         command: /usr/sbin/grub2-setpassword --output=/boot/grub2
@@ -212,7 +571,7 @@
         owner: root
         group: root
         mode: '0600'
-        backup: true
+        backup: false
         validate: /usr/sbin/sshd -t -f %s
       register: cis_sshd_client_alive_change
     - name: 5.1.9 | Reload sshd
@@ -366,8 +725,8 @@
       ansible.builtin.assert:
         that:
         - cis_pam_required_features | difference(cis_pam_supported.stdout.split()) | length == 0
-        fail_msg: Required features are unsupported by the active profile. Review its templates without changing the
-          authentication provider.
+        fail_msg: Required features are unsupported by the active profile. Review its templates without changing
+          the authentication provider.
     - name: PAM | Record existing Winbind integration
       ansible.builtin.command:
         argv:
@@ -434,7 +793,6 @@
         - /usr/sbin/sshd
         - -t
       changed_when: false
-
   - name: 5.3.2.2 | Verify enabled module entries in both PAM files
     become: true
     ansible.builtin.shell: |
@@ -505,7 +863,6 @@
       executable: /bin/bash
     changed_when: false
     when: cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.4']) | length > 0
-
   - name: 5.3.3.3.3 | Configure use_authtok in managed PAM templates
     become: true
     when: '''5.3.3.3.3'' in cis_custom_remediation_ids'
@@ -608,7 +965,7 @@
           path: /etc/authselect/{{ cis_history_target }}/{{ item }}
           regexp: (?m)^([ \t]*password[ \t]+(?:requisite|required|sufficient)[ \t]+pam_pwhistory\.so)(?![^\r\n#]*\buse_authtok\b)([^\r\n]*)$
           replace: \g<1> use_authtok\g<2>
-          backup: true
+          backup: false
         loop:
         - system-auth
         - password-auth
@@ -718,8 +1075,8 @@
       ansible.builtin.assert:
         that:
         - cis_history_after.stdout.split() | length > 0
-        - cis_history_after.stdout.split()[0] == (cis_history_target if cis_history_template_state.needs_change else
-          cis_history_selection.stdout.split()[0])
+        - cis_history_after.stdout.split()[0] == (cis_history_target if cis_history_template_state.needs_change
+          else cis_history_selection.stdout.split()[0])
         - cis_history_selection.stdout.split()[1:] | difference(cis_history_after.stdout.split()[1:]) | length ==
           0
     - name: 5.3.3.3.3 | Verify SSH configuration syntax
@@ -728,7 +1085,6 @@
         - /usr/sbin/sshd
         - -t
       changed_when: false
-
   - name: 5.3.3.4.1 | Manage nullok through authselect
     become: true
     when: '''5.3.3.4.1'' in cis_custom_remediation_ids'
@@ -858,7 +1214,7 @@
         regexp: (?m)^([ \t]*(?:auth|account|password|session)[ \t]+(?:requisite|required|sufficient)[ \t]+pam_unix\.so[^\n\r#]*?)[
           \t]+nullok\b
         replace: \g<1>
-        backup: true
+        backup: false
       loop:
       - system-auth
       - password-auth
@@ -935,7 +1291,6 @@
         - cis_nullok_remaining.rc == 1
         fail_msg: 'nullok remains in the generated PAM files: {{ cis_nullok_remaining.stdout }}'
         success_msg: Generated PAM files contain no active nullok; existing features are preserved.
-
   - name: 5.4.1.3 | Configure password expiration warning days
     become: true
     when: '''5.4.1.3'' in cis_custom_remediation_ids'
@@ -961,7 +1316,7 @@
         line: PASS_WARN_AGE {{ cis_password_warn_days | int }}
         owner: root
         group: root
-        backup: true
+        backup: false
       when: |-
         not (
           cis_password_warn_default.stdout | trim
@@ -1017,7 +1372,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
         content: |
           [Unit]
           Description=AIDE filesystem integrity check
@@ -1037,7 +1392,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
         content: |
           [Unit]
           Description=Daily AIDE filesystem integrity check
@@ -1090,10 +1445,10 @@
     - name: 6.1.2 | Retire duplicate direct AIDE cron checks
       ansible.builtin.replace:
         path: '{{ item }}'
-        regexp: (?m)^[ \t]*(?:(?:[^# \t\r\n]+[ \t]+){5}|@(?:daily|hourly|weekly|monthly|yearly|annually|reboot)[ \t]+)(?:root[
-          \t]+)?/usr/sbin/aide[ \t]+--check[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)
+        regexp: (?m)^[ \t]*(?:(?:[^# \t\r\n]+[ \t]+){5}|@(?:daily|hourly|weekly|monthly|yearly|annually|reboot)[
+          \t]+)(?:root[ \t]+)?/usr/sbin/aide[ \t]+--check[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)
         replace: ''
-        backup: true
+        backup: false
       loop: |-
         {{
           (cis_aide_system_cron_files.files | map(attribute='path') | list)
@@ -1203,7 +1558,6 @@
       loop_control:
         label: '{{ item.item.path }}'
       when: item.stat.exists | default(false)
-  
   - name: 7.2.3 | Restore missing groups using the sole local username
     become: true
     when: '''7.2.3'' in (cis_custom_remediation_ids | default([]))'
@@ -1278,7 +1632,7 @@
         cis_gid_create_commands: []
     - name: 7.2.3 | Plan native group creation commands
       ansible.builtin.set_fact:
-        cis_gid_create_commands: >-
+        cis_gid_create_commands: |-
           {{ cis_gid_create_commands + [[
               '/usr/sbin/groupadd', '--gid', item.gid | string, '--', item.name
           ]] }}
@@ -1289,12 +1643,12 @@
       cis_command_with_backup:
         commands: '{{ cis_gid_create_commands }}'
         paths:
-          - /etc/group
-          - /etc/gshadow
+        - /etc/group
+        - /etc/gshadow
         backup_location: adjacent
       when:
-        - cis_gid_create_commands | length > 0
-        - not ansible_check_mode
+      - cis_gid_create_commands | length > 0
+      - not ansible_check_mode
     - name: 7.2.3 | Recheck all local primary group references
       ansible.builtin.command:
         argv:
@@ -1335,9 +1689,6 @@
           }}. Safe candidates may have been created; unresolved accounts were not modified.'
         success_msg: All local passwd primary GIDs exist in /etc/group.
       when: not ansible_check_mode
-  
- 
-        
   - name: 1.2.1.1 | Import approved package-signing keys
     become: true
     ansible.builtin.rpm_key:
@@ -1375,7 +1726,8 @@
       - item.unit | default('') | length > 0
       - item.action | default('') in ['stop', 'mask', 'remove']
       - item.action != 'remove' or item.package | default('') | length > 0
-      fail_msg: Listener remediation requires unit and action=stop|mask|remove. The remove action also requires package.
+      fail_msg: Listener remediation requires unit and action=stop|mask|remove. The remove action also requires
+        package.
     loop: '{{ cis_listener_remediation_actions | default([]) }}'
     loop_control:
       label: '{{ item.unit | default(''invalid entry'') }}'
@@ -1439,12 +1791,12 @@
         path: /etc/tmpfiles.d/systemd.conf
         regexp: ^([ \t]*z[ \t]+/(?:var|run)/log/journal/\S*\.journal\S*[ \t]+)\S+
         replace: \g<1>{{ cis_journal_file_mode }}
-        backup: true
+        backup: false
     - name: Add journal-file rules without changing directory permissions
       ansible.builtin.blockinfile:
         path: /etc/tmpfiles.d/systemd.conf
         marker: '# {mark} CIS JOURNAL FILE PERMISSIONS'
-        backup: true
+        backup: false
         block: |
           z /var/log/journal/*/*.journal* {{ cis_journal_file_mode }} - - - -
           z /run/log/journal/*/*.journal* {{ cis_journal_file_mode }} - - - -
@@ -1485,14 +1837,14 @@
           ((cis_three_journald_before.content | b64decode)
            | regex_findall('(?m)^\s*\[([^\]\r\n]+)\][ \t]*$')
            | last | default('')) == 'Journal'
-        fail_msg: The last section in /etc/systemd/journald.conf is not [Journal]. Appending settings at EOF would put
-          them in the wrong section.
+        fail_msg: The last section in /etc/systemd/journald.conf is not [Journal]. Appending settings at EOF would
+          put them in the wrong section.
     - name: Append policy values at EOF without another section header
       ansible.builtin.blockinfile:
         path: /etc/systemd/journald.conf
         marker: '# {mark} CIS JOURNAL ROTATION'
         insertafter: EOF
-        backup: true
+        backup: false
         block: |
           SystemMaxUse={{ cis_journald_system_max_use }}
           SystemKeepFree={{ cis_journald_system_keep_free }}
@@ -1597,7 +1949,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
         content: |
           /var/log/cron
           /var/log/maillog
@@ -1763,7 +2115,8 @@
       ansible.builtin.assert:
         that:
         - cis_nftables_policy_configured | default(false) | bool
-        - (cis_nftables_management_sources | default([]) | length > 0) or (cis_nftables_management_ipv6_sources | default([]) | length > 0)
+        - (cis_nftables_management_sources | default([]) | length > 0) or (cis_nftables_management_ipv6_sources
+          | default([]) | length > 0)
         - cis_nftables_management_tcp_ports | default([]) | length > 0
         - (ansible_port | default(22) | int) in (cis_nftables_management_tcp_ports | map('int') | list)
         fail_msg: Approved management source CIDRs and the actual SSH port are required before any nftables changes.
@@ -1801,7 +2154,7 @@
         owner: root
         group: root
         mode: '0600'
-        backup: true
+        backup: false
         validate: /usr/sbin/nft -c -f %s
       register: cis_nftables_rules
     - name: Configure nftables service loader
@@ -1810,7 +2163,7 @@
         owner: root
         group: root
         mode: '0600'
-        backup: true
+        backup: false
         content: |
           include "/etc/nftables/cis-rhel9.nft"
       register: cis_nftables_loader
@@ -1856,7 +2209,7 @@
         dump: '{{ (cis_tmp_entry.stdout | from_json).dump }}'
         passno: '{{ (cis_tmp_entry.stdout | from_json).passno }}'
         state: mounted
-        backup: true
+        backup: false
     - name: 1.1.2.1.4 | Ensure live mount has noexec
       ansible.posix.mount:
         path: /tmp
@@ -1887,7 +2240,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
   - name: 5.3.3.3.2 | Enforce password history for root
     ansible.builtin.lineinfile:
       path: /etc/security/pwhistory.conf
@@ -1897,7 +2250,7 @@
       owner: root
       group: root
       mode: '0644'
-      backup: true
+      backup: false
     become: true
     when: '''5.3.3.3.2'' in cis_custom_remediation_ids'
   - name: 6.1.3 | Protect audit tools with AIDE cryptographic rules
@@ -1939,7 +2292,7 @@
           /usr/sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
           /usr/sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
           /usr/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
-        backup: true
+        backup: false
         validate: /usr/sbin/aide --config %s --config-check
   - name: 7.2.9 | Remediate recursive interactive-user dotfile access
     become: true
@@ -1975,7 +2328,7 @@
         path: '{{ item.path }}'
         regexp: ^\s*difok\s*=.*$
         state: absent
-        backup: true
+        backup: false
       loop: '{{ cis_extra_pwquality_fragments.files }}'
       loop_control:
         label: '{{ item.path }}'
@@ -1988,7 +2341,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
   - name: 5.3.3.2.4 | Configure maxrepeat
     when: '''5.3.3.2.4'' in cis_custom_remediation_ids'
     become: true
@@ -2013,7 +2366,7 @@
         path: '{{ item.path }}'
         regexp: ^\s*maxrepeat\s*=.*$
         state: absent
-        backup: true
+        backup: false
       loop: '{{ cis_extra_pwquality_fragments.files }}'
       loop_control:
         label: '{{ item.path }}'
@@ -2026,7 +2379,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
   - name: 5.3.3.2.5 | Configure maxsequence
     when: '''5.3.3.2.5'' in cis_custom_remediation_ids'
     become: true
@@ -2051,7 +2404,7 @@
         path: '{{ item.path }}'
         regexp: ^\s*maxsequence\s*=.*$
         state: absent
-        backup: true
+        backup: false
       loop: '{{ cis_extra_pwquality_fragments.files }}'
       loop_control:
         label: '{{ item.path }}'
@@ -2064,7 +2417,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
   - name: 1.7.3 | Configure approved remote login banner
     when: '''1.7.3'' in cis_custom_remediation_ids'
     become: true
@@ -2082,7 +2435,7 @@
         owner: root
         group: root
         mode: '0644'
-        backup: true
+        backup: false
   - name: Apply collection remediation for proven failures only
     ansible.builtin.include_role:
       name: trippsc2.cis.rhel9
@@ -2096,7 +2449,8 @@
       rhel9cis_issue_banner: '{{ cis_local_login_banner_text }}'
       rhel9cis_issue_net_banner: '{{ cis_remote_login_banner_text }}'
       rhel9cis_chrony_servers: '{{ cis_chrony_sources }}'
-      rhel9cis_firewall: "{{ cis_firewall_backend if cis_firewall_backend in ['firewalld', 'nftables'] else omit }}"
+      rhel9cis_firewall: '{{ cis_firewall_backend if cis_firewall_backend in [''firewalld'', ''nftables''] else
+        omit }}'
       rhel9cis_sshd_allow_users: '{{ cis_ssh_allowed_users }}'
       rhel9cis_sshd_allow_groups: '{{ cis_ssh_allowed_groups }}'
       rhel9cis_sshd_deny_users: '{{ cis_ssh_denied_users }}'
@@ -2177,4 +2531,5 @@
           remediation_errors: '{{ cis_remediation_errors | default([]) }}'
   - name: Stop remediation on failure
     ansible.builtin.fail:
-      msg: Remediation failed. Review the failed task and recorded evidence before further changes. No automatic rollback was attempted.
+      msg: Remediation failed. Review the failed task and recorded evidence before further changes. No automatic
+        rollback was attempted.
