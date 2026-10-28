@@ -130,6 +130,41 @@ class CallbackModule(CallbackBase):
                 lines.append(f'Original: {original} | Changed: {changed} | Backup: {backup}')
         return '\n'.join(dict.fromkeys(lines))
 
+    @staticmethod
+    def _brief(value, limit=1200):
+        """Keep CSV cells readable without copying commands or embedded programs."""
+        text = ' '.join(str(value or '').split())
+        return text if len(text) <= limit else text[:limit] + ' [truncated]'
+
+    @classmethod
+    def _format_remediation_output(cls, events):
+        lines = []
+        for event in events:
+            # Final backup records have their own column. Internal preparation is
+            # not remediation, even when a helper reports changed=true.
+            if event.get('internal_backup'):
+                continue
+            failed = event.get('status') == 'failed'
+            if not failed and not event.get('changed'):
+                continue
+            status = 'FAILED' if failed else 'CHANGED'
+            task = cls._brief(event.get('task', 'Remediation task'), 300)
+            module = cls._brief(event.get('module', ''), 80)
+            line = f'{status}: {task} [{module}]'
+            path = event.get('dest') or event.get('path')
+            if path:
+                line += ' | ' + cls._brief(path, 300)
+            if event.get('output') == 'REDACTED: Ansible no_log task':
+                line += ' | Details redacted'
+            if failed:
+                if event.get('rc') is not None:
+                    line += ' | rc=' + str(event['rc'])
+                # stdout/cmd/parameters can contain entire scripts or secrets.
+                line += ' | ' + cls._brief(event.get('msg') or event.get('backup_error')
+                                          or 'See Ansible task failure output')
+            lines.append(line)
+        return '\n'.join(dict.fromkeys(lines))
+
     def _record_remediation(self, result, failed=False):
         """Collect real task results between the pre and remediation payloads.
 
@@ -149,6 +184,7 @@ class CallbackModule(CallbackBase):
         action = str(getattr(task, 'action', '')).rsplit('.', 1)[-1]
         task_tags = getattr(task, 'tags', []) or []
         finalized_backup = 'cis_changed_file_backups' in task_tags
+        internal_backup = finalized_backup or 'cis_backup_prepare' in task_tags
         if not failed and 'cis_backup_prepare' in task_tags:
             return
         if not failed and action in  {
@@ -210,6 +246,7 @@ class CallbackModule(CallbackBase):
                 'status': 'failed' if item.get('failed', failed if item is data else False) else 'ok',
                 'changed': bool(item.get('changed', False)),
                 'controls': sorted(ids),
+                'internal_backup': internal_backup,
             }
             if private:
                 event['output'] = 'REDACTED: Ansible no_log task'
@@ -394,11 +431,7 @@ class CallbackModule(CallbackBase):
             state["errors"] = list(state.get("errors") or []) + event_errors
 
             backup_details = self._format_backup_details(events)
-            output_events = [
-                {key: value for key, value in event.items()
-                 if key not in {"backup_details", "backup_file", "backup"}}
-                for event in events
-            ]
+            remediation_summary = self._format_remediation_output(events)
 
             if operation == "validate":
                 final_status = pre_status
@@ -451,18 +484,14 @@ class CallbackModule(CallbackBase):
                     "final_status": final_status,
                     "pre_validation_output": pre.get("evidence", ""),
                     "remediation_output": (
-                        json.dumps(
-                            output_events,
-                            ensure_ascii=False,
-                            default=str,
-                        )
-                        if output_events
+                        remediation_summary
+                        if remediation_summary
                         else (
                             "Not run: remediation explicitly skipped by "
                             "cis_remediation_skip_ids."
                             if final_status == "REMEDIATION_SKIPPED_BY_POLICY"
                             else (
-                                "No mapped remediation task result was captured; "
+                                "No changed remediation task result was captured; "
                                 "do not infer a change from the final status."
                                 if control_id in attempted
                                 else (
@@ -473,7 +502,11 @@ class CallbackModule(CallbackBase):
                         )
                     ),
                     "backup_details": backup_details,
-                    "remediation_error": json.dumps(state['errors'], ensure_ascii=False, default=str) if state['errors'] else '',
+                    "remediation_error": '\n'.join(dict.fromkeys(
+                        self._brief(error.get('task', 'Remediation')) + ': '
+                        + self._brief(error.get('message', 'Task failed'))
+                        + (' | rc=' + str(error['rc']) if error.get('rc') is not None else '')
+                        for error in state['errors'])),
                     "evidence": (
                         post.get("evidence", "") if post else pre.get("evidence", "")
                     ),
