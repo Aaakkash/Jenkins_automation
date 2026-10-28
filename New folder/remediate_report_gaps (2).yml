@@ -1203,17 +1203,141 @@
       loop_control:
         label: '{{ item.item.path }}'
       when: item.stat.exists | default(false)
-  - name: 7.2.3 | Find all groups with GID 0
-    when: '''7.2.3'' in cis_custom_remediation_ids'
+  
+  - name: 7.2.3 | Restore missing groups using the sole local username
     become: true
-    ansible.builtin.shell: |
-      awk -F: '($3 == 0) {print $1}' /etc/group
-    register: gid0_groups
-    changed_when: false
-  - name: 7.2.3 | Report groups with GID 0
-    when: '''7.2.3'' in cis_custom_remediation_ids'
-    ansible.builtin.debug:
-      msg: 'Groups with GID 0: {{ gid0_groups.stdout_lines }}'
+    when: '''7.2.3'' in (cis_custom_remediation_ids | default([]))'
+    block:
+    - name: 7.2.3 | Identify missing GIDs and local/NSS conflicts
+      ansible.builtin.command:
+        argv:
+        - python3
+        - -c
+        - |-
+          import collections,json,os,pathlib,re,subprocess,sys
+          try:
+              groups={};local_names={}
+              for number,line in enumerate(pathlib.Path('/etc/group').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=4 or not fields[2].isdigit():
+                      raise ValueError('Malformed /etc/group entry at line '+str(number))
+                  gid=int(fields[2]);groups.setdefault(gid,[]).append(fields[0]);local_names[fields[0]]=gid
+              if not groups:raise ValueError('/etc/group contains no usable entries')
+              missing=collections.defaultdict(list);seen=set()
+              for number,line in enumerate(pathlib.Path('/etc/passwd').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=7 or not fields[2].isdigit() or not fields[3].isdigit():
+                      raise ValueError('Malformed /etc/passwd entry at line '+str(number))
+                  if fields[0] in seen:raise ValueError('Duplicate local username: '+fields[0])
+                  seen.add(fields[0]);gid=int(fields[3])
+                  if gid not in groups:missing[gid].append({'name':fields[0],'uid':int(fields[2]),'gid':gid})
+              candidates=[];review=[]
+              def resolves(key):
+                  result=subprocess.run(['getent','group',str(key)],capture_output=True,text=True,
+                                        timeout=20,env=dict(os.environ,LC_ALL='C'))
+                  if result.returncode==0:
+                      if not result.stdout.strip():raise ValueError('Empty successful NSS lookup for '+str(key))
+                      return result.stdout.strip()
+                  if result.returncode==2 and not result.stdout.strip() and not result.stderr.strip():return None
+                  raise ValueError('Cannot safely query NSS for '+str(key)+': '+result.stderr.strip())
+              for gid,users in sorted(missing.items()):
+                  reason=None;name=users[0]['name']
+                  if gid==0 or gid>4294967294:reason='Privileged or unsupported missing GID requires manual repair'
+                  elif len(users)!=1:reason='Missing GID is shared by multiple local users; no unique username can be selected'
+                  elif not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]*[$]?',name):reason='Username is not suitable for automatic local group naming'
+                  else:
+                      resolved_gid=resolves(gid)
+                      if resolved_gid is not None:reason='GID already resolves through NSS; do not duplicate a directory group'
+                      elif name in local_names or resolves(name) is not None:
+                          name='cis_gid_'+str(gid)
+                          if name in local_names or resolves(name) is not None:
+                              reason='Fallback group name '+name+' already exists locally or through NSS; do not modify it'
+                  if reason:review.append({'gid':gid,'users':[u['name'] for u in users],'reason':reason})
+                  else:candidates.append({'name':name,'gid':gid})
+              print(json.dumps({'candidates':candidates,'review_required':review,
+                                'invalid_users':[u for users in missing.values() for u in users]}))
+          except (OSError,ValueError,subprocess.TimeoutExpired) as error:
+              print('Cannot build group remediation plan: '+str(error),file=sys.stderr)
+              sys.exit(2)
+      register: cis_gid_plan_result
+      changed_when: false
+      check_mode: false
+    - name: 7.2.3 | Decode automatic group restoration plan
+      ansible.builtin.set_fact:
+        cis_gid_plan: '{{ cis_gid_plan_result.stdout | from_json }}'
+    - name: 7.2.3 | Report planned changes and unresolved cases
+      ansible.builtin.debug:
+        msg:
+          create_groups: '{{ cis_gid_plan.candidates }}'
+          manual_review_required: '{{ cis_gid_plan.review_required }}'
+          check_mode: '{{ ansible_check_mode }}'
+    - name: 7.2.3 | Initialize file-writing command plan
+      ansible.builtin.set_fact:
+        cis_gid_create_commands: []
+    - name: 7.2.3 | Plan native group creation commands
+      ansible.builtin.set_fact:
+        cis_gid_create_commands: >-
+          {{ cis_gid_create_commands + [[
+              '/usr/sbin/groupadd', '--gid', item.gid | string, '--', item.name
+          ]] }}
+      loop: '{{ cis_gid_plan.candidates }}'
+      loop_control:
+        label: '{{ item.name }}:{{ item.gid }}'
+    - name: 7.2.3 | Create groups with verified changed-file backups
+      cis_command_with_backup:
+        commands: '{{ cis_gid_create_commands }}'
+        paths:
+          - /etc/group
+          - /etc/gshadow
+        backup_location: adjacent
+      when:
+        - cis_gid_create_commands | length > 0
+        - not ansible_check_mode
+    - name: 7.2.3 | Recheck all local primary group references
+      ansible.builtin.command:
+        argv:
+        - python3
+        - -c
+        - |-
+          import json,pathlib,sys
+          try:
+              gids=set()
+              for number,line in enumerate(pathlib.Path('/etc/group').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=4 or not fields[2].isdigit():raise ValueError('Malformed group entry at line '+str(number))
+                  gids.add(int(fields[2]))
+              if not gids:raise ValueError('/etc/group contains no usable entries')
+              invalid=[]
+              for number,line in enumerate(pathlib.Path('/etc/passwd').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=7 or not fields[3].isdigit():raise ValueError('Malformed passwd entry at line '+str(number))
+                  if int(fields[3]) not in gids:invalid.append({'name':fields[0],'gid':int(fields[3])})
+              print(json.dumps(invalid))
+          except (OSError,ValueError) as error:
+              print('Cannot validate local primary groups: '+str(error),file=sys.stderr);sys.exit(2)
+      register: cis_gid_post_result
+      changed_when: false
+      check_mode: false
+    - name: 7.2.3 | Report remaining invalid primary GIDs
+      ansible.builtin.debug:
+        msg:
+          invalid_users: '{{ cis_gid_post_result.stdout | from_json }}'
+          manual_review_required: '{{ cis_gid_plan.review_required }}'
+    - name: 7.2.3 | Require every local primary GID to exist after remediation
+      ansible.builtin.assert:
+        that:
+        - cis_gid_post_result.stdout | from_json | length == 0
+        fail_msg: 'Unresolved primary GIDs: {{ cis_gid_post_result.stdout }}. Review reasons: {{ cis_gid_plan.review_required
+          }}. Safe candidates may have been created; unresolved accounts were not modified.'
+        success_msg: All local passwd primary GIDs exist in /etc/group.
+      when: not ansible_check_mode
+  
+ 
+        
   - name: 1.2.1.1 | Import approved package-signing keys
     become: true
     ansible.builtin.rpm_key:
