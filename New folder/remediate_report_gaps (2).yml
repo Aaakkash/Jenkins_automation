@@ -3,6 +3,11 @@
     cis_active_remediation_control_id: '{{ cis_remediation_control_id }}'
 - name: '{{ cis_remediation_control_id | default(''Collection batch'', true) }} | Run remediation'
   block:
+  - name: Initialize changed-file backup transaction
+    ansible.builtin.set_fact:
+      cis_backup_transaction_ready: false
+      cis_backup_transaction:
+        entries: []
   - name: Enforce site firewall policy at remediation dispatch
     ansible.builtin.assert:
       that:
@@ -17,7 +22,7 @@
       - python3
       - -c
       - |
-        import collections,glob,json,os,pathlib,stat,subprocess,sys
+        import collections,glob,json,os,pathlib,re,shlex,stat,subprocess,sys
         try:
             custom_ids=json.loads(os.environ['CIS_BACKUP_CUSTOM_IDS'])
             collection_ids=json.loads(os.environ['CIS_BACKUP_COLLECTION_IDS'])
@@ -277,6 +282,24 @@
                     for path in glob.glob(pattern,recursive=True):add(path,control)
             for kind,ids in [('custom',custom_ids),('collection',collection_ids)]:
                 for control in ids:patterns(maps[kind].get(control,[]),control)
+            if '5.1.20' in custom_ids:
+                # SSH Include paths are relative to /etc/ssh, including nested Includes.
+                todo=[config.get('sshd_config_file','/etc/ssh/sshd_config')];seen=set()
+                base=config.get('sshd_config_dir','/etc/ssh')
+                while todo:
+                    path=todo.pop()
+                    if not os.path.isabs(path):raise ValueError('sshd configuration path must be absolute')
+                    physical=os.path.realpath(path)
+                    if physical in seen:continue
+                    seen.add(physical)
+                    if not os.path.isfile(physical):raise ValueError('sshd configuration missing: '+path)
+                    add(path,'5.1.20')
+                    for line in pathlib.Path(physical).read_text().splitlines():
+                        match=re.match(r'^[ \t]*Include(?:[ \t]+|[ \t]*=[ \t]*)(.*)$',line,re.I)
+                        if not match:continue
+                        for pattern in shlex.split(match.group(1),comments=True):
+                            if not os.path.isabs(pattern):pattern=os.path.join(base,pattern)
+                            todo.extend(sorted(glob.glob(pattern)))
             pam={'5.3.2.1','5.3.2.2','5.3.2.4','5.3.3.3.3','5.3.3.4.1'} & selected
             if pam:
                 result=subprocess.run(['authselect','current','--raw'],capture_output=True,text=True,timeout=30)
@@ -344,32 +367,84 @@
     environment:
       CIS_BACKUP_CUSTOM_IDS: '{{ cis_custom_remediation_ids | default([]) | to_json }}'
       CIS_BACKUP_COLLECTION_IDS: '{{ cis_collection_remediation_ids | default([]) | to_json }}'
-      CIS_BACKUP_CONFIG: '{{ {''unowned_paths'': cis_unowned_path_ownership | default([]), ''aide_cron_file'': rhel9cis_aide_cron_file
-        | default(''aide''), ''repositories'': cis_repository_definitions | default([]), ''extra_paths'': cis_backup_extra_paths_by_control
-        | default({})} | to_json }}'
+      CIS_BACKUP_CONFIG: '{{ {''sshd_config_file'': cis_sshd_config_file | default(''/etc/ssh/sshd_config''), ''sshd_config_dir'':
+        cis_sshd_config_dir | default(''/etc/ssh''), ''unowned_paths'': cis_unowned_path_ownership | default([]),
+        ''aide_cron_file'': rhel9cis_aide_cron_file | default(''aide''), ''repositories'': cis_repository_definitions
+        | default([]), ''extra_paths'': cis_backup_extra_paths_by_control | default({})} | to_json }}'
     register: cis_prechange_backup_plan
     changed_when: false
     check_mode: false
-  - name: Set timestamp for same-folder remediation backups
-    ansible.builtin.set_fact:
-      cis_prechange_backup_timestamp: '{{ now(utc=true, fmt=''%Y%m%dT%H%M%S%fZ'') }}'
-  - name: Back up selected existing remediation files in their own folders
+  - name: Prepare private pre-change file snapshots
     become: true
-    ansible.builtin.copy:
-      src: '{{ item.path }}'
-      dest: '{{ item.path | dirname }}/backup_CIS_remediation_{{ item.path | basename }}_{{ cis_prechange_backup_timestamp
-        }}.bak'
-      remote_src: true
-      owner: root
-      group: root
-      mode: '0600'
-      backup: false
-    loop: '{{ cis_prechange_backup_plan.stdout | from_json }}'
-    loop_control:
-      label: '{{ item.control_ids | join('', '') }} | {{ item.path }}'
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
+
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        entries=[]
+        try:
+            stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+                path=item['path'];before=fingerprint(path)
+                if before is None:continue
+                directory=tempfile.mkdtemp(prefix='.cis_prechange_'+stamp+'_',dir=os.path.dirname(path))
+                os.chmod(directory,0o700)
+                name='backup_CIS_remediation_'+os.path.basename(path)+'_'+stamp+'.bak'
+                entry=dict(item,before=before,directory=directory,snapshot=os.path.join(directory,name),
+                           destination=os.path.join(os.path.dirname(path),name))
+                entries.append(entry)
+                # Anchor writes to a private directory descriptor; never follow a replaced snapshot link.
+                directory_fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:
+                    source_fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                    with os.fdopen(source_fd,'rb') as source:
+                        source_info=os.fstat(source.fileno())
+                        if not stat.S_ISREG(source_info.st_mode):raise ValueError('Snapshot source is not a regular file: '+path)
+                        target_fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory_fd)
+                        with os.fdopen(target_fd,'wb') as target:
+                            shutil.copyfileobj(source,target)
+                            target.flush()
+                            os.fchown(target.fileno(),before[2],before[3]);os.fchmod(target.fileno(),before[1])
+                            attributes={key:base64.b64decode(value) for key,value in before[5]}
+                            for key in os.listxattr(target.fileno()):
+                                if key not in attributes:os.removexattr(target.fileno(),key)
+                            for key,value in attributes.items():os.setxattr(target.fileno(),key,value)
+                            os.utime(target.fileno(),ns=(source_info.st_atime_ns,before[4]))
+                finally:
+                    os.close(directory_fd)
+                if fingerprint(path)!=before or fingerprint(entry['snapshot'])!=before:
+                    raise ValueError('Snapshot mismatch or concurrent file change: '+path)
+            print(json.dumps({'entries':entries}))
+        except (OSError,ValueError) as error:
+            for entry in entries:
+                shutil.rmtree(entry['directory'],ignore_errors=True)
+            print('Cannot prepare pre-change snapshots: '+str(error),file=sys.stderr)
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
+    register: cis_backup_prepare_result
+    changed_when: false
     when: not ansible_check_mode
     tags:
-    - cis_prechange_backup
+    - cis_backup_prepare
+  - name: Save prepared backup transaction
+    ansible.builtin.set_fact:
+      cis_backup_transaction: '{{ cis_backup_prepare_result.stdout | from_json }}'
+      cis_backup_transaction_ready: true
+    when: not ansible_check_mode
   - name: Load collection rule reset values
     ansible.builtin.include_vars:
       file: '{{ role_path }}/vars/disable_all.yml'
@@ -675,7 +750,7 @@
           changed_when: false
         - name: 5.3.2.1 | Select the custom profile with existing features and backup
           ansible.builtin.command:
-            argv: '{{ [''authselect'', ''select'', cis_pam_expected_profile, ''-b''] + cis_pam_before.stdout.split()[1:]
+            argv: '{{ [''authselect'', ''select'', cis_pam_expected_profile] + cis_pam_before.stdout.split()[1:]
               }}'
           changed_when: true
     - name: PAM | Determine requested features
@@ -746,7 +821,6 @@
         - authselect
         - enable-feature
         - '{{ item }}'
-        - -b
       loop: '{{ cis_pam_required_features | difference(cis_pam_before.stdout.split()[1:]) }}'
       changed_when: true
     - name: PAM | Apply authselect changes as specified in the CIS solution
@@ -754,7 +828,6 @@
         argv:
         - authselect
         - apply-changes
-        - -b
       changed_when: false
     - name: PAM | Verify managed configuration
       ansible.builtin.command:
@@ -1012,7 +1085,7 @@
         changed_when: false
       - name: 5.3.3.3.3 | Activate the derived profile with all existing features and backup
         ansible.builtin.command:
-          argv: '{{ [''authselect'', ''select'', cis_history_target, ''-b''] + cis_history_selection.stdout.split()[1:]
+          argv: '{{ [''authselect'', ''select'', cis_history_target] + cis_history_selection.stdout.split()[1:]
             }}'
         when: cis_history_target != cis_history_selection.stdout.split()[0]
         changed_when: true
@@ -1021,7 +1094,6 @@
           argv:
           - authselect
           - apply-changes
-          - -b
         when: cis_history_target == cis_history_selection.stdout.split()[0]
         changed_when: true
     - name: 5.3.3.3.3 | Verify managed integrity after remediation
@@ -1176,7 +1248,7 @@
         changed_when: false
       - name: 5.3.3.4.1 | Select the custom profile with existing features and backup
         ansible.builtin.command:
-          argv: '{{ [''authselect'', ''select'', cis_nullok_expected_profile, ''-b''] + cis_nullok_selection.stdout.split()[1:]
+          argv: '{{ [''authselect'', ''select'', cis_nullok_expected_profile] + cis_nullok_selection.stdout.split()[1:]
             }}'
         changed_when: true
     - name: 5.3.3.4.1 | Inspect custom template file types
@@ -1239,7 +1311,6 @@
           - authselect
           - enable-feature
           - without-nullok
-          - -b
         when: '''without-nullok'' not in cis_nullok_selection.stdout.split()[1:]'
         changed_when: true
     - name: 5.3.3.4.1 | Apply template changes through authselect
@@ -1247,7 +1318,6 @@
         argv:
         - authselect
         - apply-changes
-        - -b
       changed_when: false
     - name: 5.3.3.4.1 | Verify authselect integrity after remediation
       ansible.builtin.command:
@@ -2436,6 +2506,102 @@
         group: root
         mode: '0644'
         backup: false
+  - name: 5.1.20 | Disable SSH root login across the active configuration tree
+    when: '''5.1.20'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.1.20 | Identify snapshotted SSH configuration files
+      ansible.builtin.set_fact:
+        cis_sshd_policy_files: '{{ cis_prechange_backup_plan.stdout | from_json | selectattr(''control_ids'', ''contains'',
+          ''5.1.20'') | list }}'
+    - name: 5.1.20 | Identify the physical main configuration file
+      ansible.builtin.set_fact:
+        cis_sshd_main_file: '{{ (cis_sshd_policy_files | selectattr(''aliases'', ''contains'', cis_sshd_config_file
+          | default(''/etc/ssh/sshd_config'')) | first).path }}'
+    - name: 5.1.20 | Validate existing SSH configuration before changes
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+    - name: 5.1.20 | Normalize root-login settings in included files
+      ansible.builtin.replace:
+        path: '{{ item.path }}'
+        regexp: (?im)^([ \t]*PermitRootLogin[ \t=]+)\S+([^\r\n]*)$
+        replace: \g<1>no\g<2>
+        backup: false
+      loop: '{{ cis_sshd_policy_files }}'
+      loop_control:
+        label: '{{ item.path }}'
+      when: item.path != cis_sshd_main_file
+      register: cis_sshd_root_include_changes
+    - name: 5.1.20 | Read main SSH configuration
+      ansible.builtin.slurp:
+        src: '{{ cis_sshd_main_file }}'
+      register: cis_sshd_main_content
+      no_log: true
+    - name: 5.1.20 | Build a single global root-login directive
+      ansible.builtin.set_fact:
+        cis_sshd_root_expected: |-
+          PermitRootLogin no
+          {{ (cis_sshd_main_content.content | b64decode) | regex_replace('(?im)^[ \t]*PermitRootLogin[ \t=]+[^\r\n]*(?:\r?\n|$)', '') }}
+      no_log: true
+    - name: 5.1.20 | Write canonical SSH root-login configuration
+      ansible.builtin.copy:
+        dest: '{{ cis_sshd_main_file }}'
+        content: '{{ cis_sshd_root_expected }}'
+        backup: false
+        validate: /usr/sbin/sshd -t -f %s
+      register: cis_sshd_root_main_change
+    - name: 5.1.20 | Verify complete SSH configuration syntax
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+    - name: 5.1.20 | Read effective global root-login policy
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -T
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+      register: cis_sshd_root_global_policy
+    - name: 5.1.20 | Read effective root connection policy
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -T
+        - -f
+        - '{{ cis_sshd_main_file }}'
+        - -C
+        - user=root,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport={{ ansible_port | default(22) }}
+      changed_when: false
+      check_mode: false
+      register: cis_sshd_root_connection_policy
+    - name: 5.1.20 | Require effective root login to be disabled
+      ansible.builtin.assert:
+        that:
+        - '''permitrootlogin no'' in cis_sshd_root_global_policy.stdout_lines'
+        - '''permitrootlogin no'' in cis_sshd_root_connection_policy.stdout_lines'
+        fail_msg: Effective SSH root login is not disabled. Review Include/Match settings; sshd was not reloaded.
+      when: not ansible_check_mode
+    - name: 5.1.20 | Reload SSH only after verified configuration changes
+      ansible.builtin.systemd_service:
+        name: sshd
+        state: reloaded
+      when:
+      - not ansible_check_mode
+      - cis_sshd_root_main_change.changed or (cis_sshd_root_include_changes.results | selectattr('changed', 'equalto',
+        true) | list | length > 0)
   - name: Apply collection remediation for proven failures only
     ansible.builtin.include_role:
       name: trippsc2.cis.rhel9
@@ -2503,7 +2669,164 @@
     when: cis_collection_remediation_ids | length > 0
   - name: Apply pending CIS collection handlers before post-validation
     ansible.builtin.meta: flush_handlers
+  - name: Retain only changed-file backups and remove unchanged snapshots
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
+
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        records=[];entries=[]
+        try:
+            entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
+            for entry in entries:
+                path=entry['path'];after=fingerprint(path)
+                snapshot=entry['snapshot'];destination=entry['destination']
+                published=os.path.lexists(destination)
+                if published:
+                    if not stat.S_ISREG(os.lstat(destination).st_mode):raise ValueError('Backup destination is not a regular file: '+destination)
+                    # Permit retry after partial finalization, never overwrite another backup.
+                    if os.path.exists(snapshot):
+                        if not os.path.samefile(snapshot,destination):raise ValueError('Backup path already exists: '+destination)
+                    elif fingerprint(destination)[0]!=entry['before'][0]:
+                        raise ValueError('Previously retained backup is inconsistent: '+destination)
+                if after==entry['before'] and not published:continue
+                if not published:
+                    fd=os.open(snapshot,os.O_RDONLY|os.O_NOFOLLOW)
+                    try:
+                        info=os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                            raise ValueError('Pre-change snapshot is not an independent regular file: '+snapshot)
+                        digest=hashlib.sha256()
+                        while True:
+                            part=os.read(fd,1024*1024)
+                            if not part:break
+                            digest.update(part)
+                        if digest.hexdigest()!=entry['before'][0]:
+                            raise ValueError('Pre-change snapshot contents changed: '+snapshot)
+                        # Change permissions through the verified descriptor, never a followed link.
+                        os.fchown(fd,os.geteuid(),os.getegid());os.fchmod(fd,0o600)
+                        os.link(snapshot,destination,follow_symlinks=False)
+                        retained=os.lstat(destination)
+                        if (retained.st_dev,retained.st_ino)!=(info.st_dev,info.st_ino):
+                            raise ValueError('Snapshot changed while publishing backup: '+snapshot)
+                    finally:
+                        os.close(fd)
+                records.append(dict(original_file=path,changed_file=path,backup_file=destination,
+                                    change_type='deleted' if after is None else 'modified',
+                                    control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            # Clean up only after all changed files have verified retained backups.
+            for entry in entries:
+                if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+        except (OSError,ValueError,KeyError) as error:
+            recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+    register: cis_backup_finish_result
+    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
+      length) > 0
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+    tags:
+    - cis_changed_file_backups
   rescue:
+  - name: Retain changed-file backups after failed remediation
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
+
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        records=[];entries=[]
+        try:
+            entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
+            for entry in entries:
+                path=entry['path'];after=fingerprint(path)
+                snapshot=entry['snapshot'];destination=entry['destination']
+                published=os.path.lexists(destination)
+                if published:
+                    if not stat.S_ISREG(os.lstat(destination).st_mode):raise ValueError('Backup destination is not a regular file: '+destination)
+                    # Permit retry after partial finalization, never overwrite another backup.
+                    if os.path.exists(snapshot):
+                        if not os.path.samefile(snapshot,destination):raise ValueError('Backup path already exists: '+destination)
+                    elif fingerprint(destination)[0]!=entry['before'][0]:
+                        raise ValueError('Previously retained backup is inconsistent: '+destination)
+                if after==entry['before'] and not published:continue
+                if not published:
+                    fd=os.open(snapshot,os.O_RDONLY|os.O_NOFOLLOW)
+                    try:
+                        info=os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                            raise ValueError('Pre-change snapshot is not an independent regular file: '+snapshot)
+                        digest=hashlib.sha256()
+                        while True:
+                            part=os.read(fd,1024*1024)
+                            if not part:break
+                            digest.update(part)
+                        if digest.hexdigest()!=entry['before'][0]:
+                            raise ValueError('Pre-change snapshot contents changed: '+snapshot)
+                        # Change permissions through the verified descriptor, never a followed link.
+                        os.fchown(fd,os.geteuid(),os.getegid());os.fchmod(fd,0o600)
+                        os.link(snapshot,destination,follow_symlinks=False)
+                        retained=os.lstat(destination)
+                        if (retained.st_dev,retained.st_ino)!=(info.st_dev,info.st_ino):
+                            raise ValueError('Snapshot changed while publishing backup: '+snapshot)
+                    finally:
+                        os.close(fd)
+                records.append(dict(original_file=path,changed_file=path,backup_file=destination,
+                                    change_type='deleted' if after is None else 'modified',
+                                    control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            # Clean up only after all changed files have verified retained backups.
+            for entry in entries:
+                if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+        except (OSError,ValueError,KeyError) as error:
+            recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+    register: cis_backup_finish_result
+    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
+      length) > 0
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+    tags:
+    - cis_changed_file_backups
+    failed_when: false
   - name: Record failed remediation control
     ansible.builtin.set_fact:
       cis_remediation_errors: |-
