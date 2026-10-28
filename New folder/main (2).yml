@@ -1,22 +1,18 @@
----
 - name: Load mandatory site-policy configuration
   ansible.builtin.include_vars:
     file: '{{ cis_site_policy_file }}'
   tags:
   - always
-
 - name: Display loaded execution configuration
   ansible.builtin.debug:
     msg:
-      policy_file: "{{ cis_site_policy_file }}"
-      requested_ids: "{{ cis_requested_control_ids | default([]) }}"
-      requested_ids_type: >-
-        {{ cis_requested_control_ids | default([]) | type_debug }}
-      firewall_backend: "{{ cis_firewall_backend | default('UNDEFINED') }}"
-      reboot_allowed: "{{ cis_reboot_allowed | default(false) }}"
+      policy_file: '{{ cis_site_policy_file }}'
+      requested_ids: '{{ cis_requested_control_ids | default([]) }}'
+      requested_ids_type: '{{ cis_requested_control_ids | default([]) | type_debug }}'
+      firewall_backend: '{{ cis_firewall_backend | default(''UNDEFINED'') }}'
+      reboot_allowed: '{{ cis_reboot_allowed | default(false) }}'
   tags:
-    - always
-
+  - always
 - name: Normalize journal rotation values from the single site-policy file
   ansible.builtin.set_fact:
     cis_journald_rotation: |-
@@ -48,8 +44,9 @@
     - cis_logging_backend in ['review', 'journald', 'rsyslog']
     - ansible_facts.distribution == 'RedHat'
     - ansible_facts.distribution_major_version == '9'
-    fail_msg: Use cis_operation=validate|remediate, cis_phase=all|01-07, cis_ipv6_policy=review|enabled|disabled, cis_firewall_backend=review|disabled|firewalld|nftables,
-      cis_logging_backend=review|journald|rsyslog, and target RHEL 9.
+    fail_msg: Use cis_operation=validate|remediate, cis_phase=all|01-07, cis_ipv6_policy=review|enabled|disabled,
+      cis_firewall_backend=review|disabled|firewalld|nftables, cis_logging_backend=review|journald|rsyslog, and
+      target RHEL 9.
   tags:
   - always
 - name: Load validation definitions
@@ -110,8 +107,8 @@
   - always
 - name: Report exclusions not present in checkpoint inventory
   ansible.builtin.debug:
-    msg: 'These excluded control IDs are not present in files/checkpoints.csv and therefore are already outside this
-      role''s scope: {{ cis_unknown_excluded_control_ids | join('', '') }}'
+    msg: 'These excluded control IDs are not present in files/checkpoints.csv and therefore are already outside
+      this role''s scope: {{ cis_unknown_excluded_control_ids | join('', '') }}'
   when: cis_unknown_excluded_control_ids | length > 0
   tags:
   - always
@@ -174,6 +171,7 @@
     - 5.3.3.2.4
     - 5.3.3.2.5
     - 1.1.2.1.4
+    - 5.1.20
     cis_effective_run_id: '{{ cis_run_id if cis_run_id | length > 0 else ansible_date_time.iso8601_basic_short }}'
   tags:
   - always
@@ -239,8 +237,6 @@
       }}
   tags:
   - always
-
-
 - name: Run read-only pre-validation
   ansible.builtin.include_tasks: validation.yml
   vars:
@@ -262,42 +258,43 @@
   - always
 - name: Identify firewall controls blocked by site backend policy
   ansible.builtin.set_fact:
-    cis_firewall_policy_skip_ids: >-
+    cis_firewall_policy_skip_ids: |-
       {{ cis_selected_control_ids | select('match', '^4[.]') | list
          if cis_firewall_backend in ['disabled', 'review']
          else (['4.3.1', '4.3.2', '4.3.3', '4.3.4']
                if cis_firewall_backend == 'firewalld'
                else ['4.2.1', '4.2.2']) }}
-  tags: [always]
+  tags:
+  - always
 - name: Select non-compliant controls supported for automatic remediation
   ansible.builtin.set_fact:
-    cis_remediation_ids: >-
+    cis_remediation_ids: |-
       {{ cis_noncompliant_ids
          | intersect(cis_remediation_capable_ids)
          | difference(cis_remediation_skip_ids | default([]))
          | difference(cis_firewall_policy_skip_ids)
          | difference(['3.1.1'] if cis_ipv6_policy != 'disabled' else [])
          | list }}
-    cis_policy_skipped_ids: >-
+    cis_policy_skipped_ids: |-
       {{ cis_noncompliant_ids
          | intersect((cis_remediation_skip_ids | default([]))
                      + cis_firewall_policy_skip_ids)
          | unique | list }}
-  tags: [always]
+  tags:
+  - always
 - name: Split effective remediation IDs by implementation
   ansible.builtin.set_fact:
     cis_collection_remediation_ids: '{{ cis_remediation_ids | difference(cis_custom_supported_ids) | list }}'
     cis_custom_remediation_ids: '{{ cis_remediation_ids | intersect(cis_custom_supported_ids) | list }}'
-  tags: [always]
-
+  tags:
+  - always
 - name: Display selected remediation controls
   ansible.builtin.debug:
     msg:
       all_remediation_ids: '{{ cis_remediation_ids }}'
       collection_remediation_ids: '{{ cis_collection_remediation_ids }}'
       custom_remediation_ids: '{{ cis_custom_remediation_ids }}'
-      remediation_skipped_by_policy: |-
-        {{ cis_policy_skipped_ids }}
+      remediation_skipped_by_policy: '{{ cis_policy_skipped_ids }}'
   when: cis_operation == 'remediate'
   tags:
   - always
@@ -320,17 +317,22 @@
   - always
   module_defaults:
     ansible.builtin.copy:
-      backup: true
+      backup: false
     ansible.builtin.template:
-      backup: true
+      backup: false
     ansible.builtin.lineinfile:
-      backup: true
+      backup: false
     ansible.builtin.blockinfile:
-      backup: true
+      backup: false
     ansible.builtin.replace:
-      backup: true
+      backup: false
     ansible.builtin.cron:
-      backup: true
+      backup: false
+    ansible.builtin.find:
+      excludes:
+      - backup_CIS_remediation_*
+      - '*-backup_CIS_remediation_*'
+      - .cis_prechange_*
   block:
   - name: Apply custom remediations independently
     ansible.builtin.include_tasks: remediate_report_gaps.yml
@@ -405,8 +407,7 @@
         results: '{{ cis_pre_validation_results }}'
         post_results: '{{ cis_post_validation_results }}'
         remediation_attempted: '{{ cis_remediation_ids if cis_operation == ''remediate'' else [] }}'
-        remediation_skipped_by_policy: |-
-          {{ cis_policy_skipped_ids }}
+        remediation_skipped_by_policy: '{{ cis_policy_skipped_ids }}'
         excluded_control_ids: '{{ cis_excluded_control_ids | default([]) }}'
         exclusion_approved_by: '{{ cis_exclusion_approved_by | default(''NOT_PROVIDED'') }}'
         exclusion_reference: '{{ cis_exclusion_reference | default(''NOT_PROVIDED'') }}'
@@ -415,16 +416,17 @@
         remediation_skip_reasons:
           configured_skip_ids: '{{ cis_remediation_skip_ids | default([]) }}'
           firewall_policy_skip_ids: '{{ cis_firewall_policy_skip_ids }}'
-          firewall_reason: 'Firewall remediation skipped by configured site backend policy; no Security exception inferred.'
+          firewall_reason: Firewall remediation skipped by configured site backend policy; no Security exception
+            inferred.
   tags:
   - always
 - name: Fail remediation run when in-scope controls remain unresolved
   ansible.builtin.assert:
     that:
     - cis_unresolved_post_results | length == 0
-    fail_msg: 'CIS remediation completed, but the following in-scope controls still do not return validator RC 0: {{
-      cis_unresolved_post_results | map(attribute=''control_id'') | list }}. Review the generated CSV evidence before
-      the next run.'
+    fail_msg: 'CIS remediation completed, but the following in-scope controls still do not return validator RC 0:
+      {{ cis_unresolved_post_results | map(attribute=''control_id'') | list }}. Review the generated CSV evidence
+      before the next run.'
   when:
   - cis_operation == 'remediate'
   - cis_fail_remediation_when_unresolved | bool
