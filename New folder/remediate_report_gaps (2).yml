@@ -22,7 +22,7 @@
       - python3
       - -c
       - |
-        import collections,glob,json,os,pathlib,re,shlex,stat,subprocess,sys
+        import collections,fnmatch,glob,json,os,pathlib,re,shlex,stat,subprocess,sys
         try:
             custom_ids=json.loads(os.environ['CIS_BACKUP_CUSTOM_IDS'])
             collection_ids=json.loads(os.environ['CIS_BACKUP_COLLECTION_IDS'])
@@ -267,12 +267,21 @@
             }
             selected=set(custom_ids+collection_ids)
             targets=collections.defaultdict(set);aliases=collections.defaultdict(set)
+            def excluded(path):
+                path=os.path.normpath(path)
+                if any(path == root or path.startswith(root+'/') for root in ('/tmp','/var/tmp','/dev/shm','/run','/var/run')):return True
+                return any(fnmatch.fnmatch(part,pattern) for part in pathlib.Path(path).parts
+                           for pattern in ('backup_CIS_remediation_*','*-backup_CIS_remediation_*',
+                                           '.cis_prechange_*','ansible-tmp-*','.ansible*','*.tmp','*.temp',
+                                           '*.swp','*.swo','.#*','*~'))
             def add(path,control):
                 if not os.path.isabs(path):raise ValueError('Backup target must be absolute: '+path)
+                if excluded(path):return
                 name=os.path.basename(path)
                 if name.startswith(('backup_CIS_remediation_','.cis_prechange_')) or '-backup_CIS_remediation_' in name:return
                 # Back up the real file beside its physical target, never a directory or device.
                 alias=path;path=os.path.realpath(path)
+                if excluded(path):return
                 try:info=os.stat(path)
                 except FileNotFoundError:return
                 if stat.S_ISREG(info.st_mode):
@@ -371,6 +380,8 @@
         cis_sshd_config_dir | default(''/etc/ssh''), ''unowned_paths'': cis_unowned_path_ownership | default([]),
         ''aide_cron_file'': rhel9cis_aide_cron_file | default(''aide''), ''repositories'': cis_repository_definitions
         | default([]), ''extra_paths'': cis_backup_extra_paths_by_control | default({})} | to_json }}'
+    tags:
+    - cis_backup_prepare
     register: cis_prechange_backup_plan
     changed_when: false
     check_mode: false
@@ -397,8 +408,14 @@
         entries=[]
         try:
             stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
             for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
-                path=item['path'];before=fingerprint(path)
+                path=item['path']
+                if path in retained:
+                    if not os.path.isfile(retained[path]['backup_file']):
+                        raise ValueError('Original backup is missing: '+retained[path]['backup_file'])
+                    continue
+                before=fingerprint(path)
                 if before is None:continue
                 directory=tempfile.mkdtemp(prefix='.cis_prechange_'+stamp+'_',dir=os.path.dirname(path))
                 os.chmod(directory,0o700)
@@ -435,6 +452,7 @@
             sys.exit(2)
     environment:
       CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
     register: cis_backup_prepare_result
     changed_when: false
     when: not ansible_check_mode
@@ -2690,6 +2708,13 @@
             return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
 
         records=[];entries=[]
+        retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
+        for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+            if item['path'] in retained:
+                record=dict(retained[item['path']])
+                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
+                records.append(record)
         try:
             entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
             for entry in entries:
@@ -2739,6 +2764,8 @@
             sys.exit(2)
     environment:
       CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
     register: cis_backup_finish_result
     changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
       length) > 0
@@ -2747,6 +2774,18 @@
     - cis_backup_transaction_ready | default(false) | bool
     tags:
     - cis_changed_file_backups
+  - name: Remember original backups across all controls in this run
+    ansible.builtin.set_fact:
+      cis_run_file_backups: >-
+        {{ ((cis_run_file_backups | default([])
+             | rejectattr('original_file', 'in', cis_finished_backup_paths) | list)
+             + cis_finished_backup_records) }}
+    vars:
+      cis_finished_backup_records: "{{ (cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) }}"
+      cis_finished_backup_paths: "{{ cis_finished_backup_records | map(attribute='original_file') | list }}"
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
   rescue:
   - name: Retain changed-file backups after failed remediation
     become: true
@@ -2769,6 +2808,13 @@
             return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
 
         records=[];entries=[]
+        retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
+        for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+            if item['path'] in retained:
+                record=dict(retained[item['path']])
+                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
+                records.append(record)
         try:
             entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
             for entry in entries:
@@ -2818,6 +2864,8 @@
             sys.exit(2)
     environment:
       CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
     register: cis_backup_finish_result
     changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
       length) > 0
@@ -2827,6 +2875,18 @@
     tags:
     - cis_changed_file_backups
     failed_when: false
+  - name: Remember original backups across all controls in this run
+    ansible.builtin.set_fact:
+      cis_run_file_backups: >-
+        {{ ((cis_run_file_backups | default([])
+             | rejectattr('original_file', 'in', cis_finished_backup_paths) | list)
+             + cis_finished_backup_records) }}
+    vars:
+      cis_finished_backup_records: "{{ (cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) }}"
+      cis_finished_backup_paths: "{{ cis_finished_backup_records | map(attribute='original_file') | list }}"
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
   - name: Record failed remediation control
     ansible.builtin.set_fact:
       cis_remediation_errors: |-
