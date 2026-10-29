@@ -388,6 +388,15 @@ class CallbackModule(CallbackBase):
                 str(item)
                 for item in (skip_reasons.get("configured_skip_ids") or [])
             )
+            
+            skip_reasons = payload.get("remediation_skip_reasons") or {}
+            skipped_by_policy.update(
+                str(item)
+                for item in (
+                    skip_reasons.get("configured_skip_ids") or []
+                )
+            )
+            
             stage_priority = {
                 "pre": 1,
                 "remediation": 2,
