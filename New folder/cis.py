@@ -34,13 +34,12 @@ class CallbackModule(CallbackBase):
         self.remediation_events: dict[tuple[str, str], list[dict]] = {}
         self.remediation_hosts: set[str] = set()
         self.active_controls: dict[str, str] = {}
+        self.backup_absent_paths: dict[str, set[str]] = {}
 
 
     @staticmethod
     def _backup_records(action, item, args):
         """Record actual backup results; never infer that a missing backup exists."""
-        if not item.get('changed'):
-            return []
         records = []
         supplied = item.get('file_backups') or []
         if action == 'command' and isinstance(item.get('stdout'), str):
@@ -63,10 +62,14 @@ class CallbackModule(CallbackBase):
             records.append(dict(original_file=original, changed_file=changed,
                                 backup_file=backup,
                                 change_type=entry.get('change_type', 'modified'),
+                                backup_status=entry.get('backup_status'),
+                                backup_created_control_ids=entry.get('backup_created_control_ids', []),
                                 original_aliases=entry.get('original_aliases', []),
                                 control_ids=entry.get('control_ids', [])))
         if records:
             return records
+        if not item.get('changed'):
+            return []
         # Explicit same-folder copies are pre-change backups, not target edits.
         source = args.get('src')
         destination = item.get('dest') or args.get('dest')
@@ -104,30 +107,53 @@ class CallbackModule(CallbackBase):
 
     @staticmethod
     def _format_backup_details(events):
-        lines = []
-        verified = set()
-        for event in events:
-            records = event.get('backup_details') or []
-            if isinstance(records, dict): records = [records]
-            for record in records:
-                if record.get('backup_file'):
-                    verified.update([record.get('original_file'), record.get('changed_file')])
-                    verified.update(record.get('original_aliases', []))
+        # A final backup/new-file record supersedes an earlier provisional
+        # warning, including physical-path aliases used by PAM symlinks.
+        resolved = set()
+        all_records = []
         for event in events:
             records = event.get('backup_details') or []
             if isinstance(records, dict):
                 records = [records]
             for record in records:
-                original = record.get('original_file', 'Not returned by module')
-                if record.get('change_type') == 'backup_not_reported' and original in verified:
+                if not isinstance(record, dict):
                     continue
-                changed = record.get('changed_file') or original
-                backup = record.get('backup_file')
-                if not backup:
-                    backup = ('N/A - file did not exist before remediation'
-                              if record.get('change_type') == 'created'
-                              else 'NOT_REPORTED - no verified pre-change backup returned')
-                lines.append(f'Original: {original} | Changed: {changed} | Backup: {backup}')
+                all_records.append(record)
+                if record.get('backup_file') or record.get('change_type') == 'created':
+                    resolved.update([record.get('original_file'), record.get('changed_file')])
+                    resolved.update(record.get('original_aliases', []))
+
+        selected = {}
+        priority = {'BACKUP_NOT_VERIFIED': 0, 'NEW_FILE_NO_ORIGINAL': 1,
+                    'BACKUP_REUSED': 2, 'BACKUP_CREATED': 3}
+        for record in all_records:
+            original = record.get('original_file', 'Not returned by module')
+            if record.get('change_type') == 'backup_not_reported' and original in resolved:
+                continue
+            backup = record.get('backup_file')
+            if backup:
+                status = record.get('backup_status') or 'BACKUP_CREATED'
+            elif record.get('change_type') == 'created':
+                status = 'NEW_FILE_NO_ORIGINAL'
+            else:
+                status = 'BACKUP_NOT_VERIFIED'
+            key = (original, backup)
+            if key not in selected or priority.get(status, 0) > priority.get(selected[key][0], 0):
+                selected[key] = (status, record)
+
+        lines = []
+        for status, record in selected.values():
+            original = record.get('original_file', 'Not returned by module')
+            backup = record.get('backup_file')
+            if status == 'NEW_FILE_NO_ORIGINAL':
+                backup = 'N/A - absent before tracked remediation'
+            elif not backup:
+                backup = 'NOT_REPORTED - no verified pre-change backup returned'
+            line = f'File: {original} | Status: {status} | Backup: {backup}'
+            origin = record.get('backup_created_control_ids') or []
+            if status == 'BACKUP_REUSED' and origin:
+                line += ' | First backup controls: ' + ', '.join(map(str, origin))
+            lines.append(line)
         return '\n'.join(dict.fromkeys(lines))
 
     @staticmethod
@@ -270,6 +296,10 @@ class CallbackModule(CallbackBase):
             args = (item.get('invocation') or {}).get('module_args') or {}
             records = self._backup_records(action, item, args)
             if records:
+                absent = self.backup_absent_paths.get(host, set())
+                for record in records:
+                    if record.get('change_type') == 'backup_not_reported' and record.get('original_file') in absent:
+                        record.update(change_type='created', backup_status='NEW_FILE_NO_ORIGINAL')
                 event['backup_details'] = records
             safe_keys = ('name', 'path', 'dest', 'src', 'state', 'mode', 'owner',
                          'group', 'enabled', 'masked', 'regexp', 'line', 'section',
@@ -334,8 +364,13 @@ class CallbackModule(CallbackBase):
                 self.active_controls[host] = control
             else:
                 self.active_controls.pop(host, None)
-        self._record_remediation(result)
         data = result._result or {}
+        message = data.get('msg')
+        if isinstance(message, dict) and 'cis_backup_absent_paths' in message:
+            observed = self.backup_absent_paths.setdefault(result._host.get_name(), set())
+            for entry in message.get('cis_backup_absent_paths') or []:
+                observed.update([entry['path']] + entry.get('aliases', []))
+        self._record_remediation(result)
         message = data.get("msg")
         if not isinstance(message, dict):
             return
@@ -347,6 +382,7 @@ class CallbackModule(CallbackBase):
         host = payload['host']
         if payload.get('stage') == 'pre':
             self.active_controls.pop(host, None)
+            self.backup_absent_paths.pop(host, None)
             self.remediation_events = {
                 key: value for key, value in self.remediation_events.items()
                 if key[0] != host
