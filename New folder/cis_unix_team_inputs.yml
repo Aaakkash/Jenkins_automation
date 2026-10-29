@@ -1,183 +1,2918 @@
----
-# Site policy: retain validation; skip firewall remediation while backend is disabled.
-# Duplicate definitions removed; the previous effective (last) values were retained.
-# Existing bootloader values are preserved. Encrypt this file as in your current setup.
-# cis_journald_rotation is authoritative; scalar aliases below agree with it.
-# cis_requested_control_ids limits this run; use [] later for normal phase selection.
-# Incomplete policy values for other controls are retained for review, not guessed.
-rhel9cis_bootloader_password: 
-cis_root_bin_action: create
-grub_pbkdf2_hash: 
-cis_backup_root: /var/backups/rhel9-cis
-cis_reboot_allowed: false
-cis_remediation_skip_ids:
-  - '4.3.1'
-  - '4.3.2'
-  - '4.3.3'
-  
-cis_excluded_control_ids:
-  - 2.1.6
-  - 2.1.12
-  - 4.1.2
-  - 4.3.4
-  - 5.2.7
-  - 5.4.1.1
-  - 5.4.1.5
-  - 5.4.2.2
-  - 5.4.2.3
-  - 7.2.5
-  - 7.1.12
-  - 5.4.2.7
-  - 6.2.2.1.1
-  - 6.2.2.1.3
-  - 6.2.2.2
-  - 6.2.2.3
-  - 6.2.2.4
-  - 1.2.2.1
-cis_exclusion_approved_by: Unix Team
-cis_exclusion_reference: Unix Team
-cis_exclusion_reason: Controls excluded from the RHEL 9 CIS remediation scope based on the formal Unix team decision.
-cis_required_filesystems: []
-cis_unused_filesystem_modules:
-  - cramfs
-  - freevxfs
-  - hfs
-  - hfsplus
-  - jffs2
-  - squashfs
-  - udf
-cis_approved_gpg_key_fingerprints: []
-cis_approved_repositories:
-  - packages-microsoft-com-prod
-  - rhel-9-for-x86_64-appstream-rpms
-  - rhel-9-for-x86_64-baseos-rpms
-cis_repository_policy_configured: true
-cis_package_updates_allowed: false
-cis_motd_banner_text: |-
-  ************************************************
-  *This system is for authorized users only. Any *
-  *unauthorized access attempts will be logged,  *
-  *and offenders will be prosecuted!             *
-  *                                              *
-  * You have been warned!                        *
-  *                                              *
-  *Thank You,                                    *
-  *The Management                                *
-  ************************************************
-cis_local_login_banner_text: |-
-  Authorized uses only.
-  All activity may be monitored and reported.
+- name: Track current remediation control
+  ansible.builtin.set_fact:
+    cis_active_remediation_control_id: '{{ cis_remediation_control_id }}'
+- name: '{{ cis_remediation_control_id | default(''Collection batch'', true) }} | Run remediation'
+  block:
+  - name: Initialize changed-file backup transaction
+    ansible.builtin.set_fact:
+      cis_backup_transaction_ready: false
+      cis_backup_transaction:
+        entries: []
+  - name: Enforce site firewall policy at remediation dispatch
+    ansible.builtin.assert:
+      that:
+      - |-
+        cis_firewall_backend not in ['disabled', 'review'] or ((cis_custom_remediation_ids + cis_collection_remediation_ids)
+         | select('match', '^4[.]') | list | length == 0)
+      fail_msg: Firewall controls cannot be remediated while the site backend is disabled or under review.
+  - name: Plan existing files for selected remediation backups
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import collections,fnmatch,glob,json,os,pathlib,re,shlex,stat,subprocess,sys
+        try:
+            custom_ids=json.loads(os.environ['CIS_BACKUP_CUSTOM_IDS'])
+            collection_ids=json.loads(os.environ['CIS_BACKUP_COLLECTION_IDS'])
+            config=json.loads(os.environ['CIS_BACKUP_CONFIG'])
+            maps={
+                'collection': {
+                    '1.1.1.1': ['/etc/modprobe.d/cramfs.conf'],
+                    '1.1.1.2': ['/etc/modprobe.d/freevxfs.conf'],
+                    '1.1.1.3': ['/etc/modprobe.d/hfs.conf'],
+                    '1.1.1.4': ['/etc/modprobe.d/hfsplus.conf'],
+                    '1.1.1.5': ['/etc/modprobe.d/jffs2.conf'],
+                    '1.1.1.6': ['/etc/modprobe.d/squashfs.conf'],
+                    '1.1.1.7': ['/etc/modprobe.d/udf.conf'],
+                    '1.1.1.8': ['/etc/modprobe.d/usb-storage.conf'],
+                    '1.1.1.9': ['/etc/modprobe.d/afs.conf', '/etc/modprobe.d/ceph.conf', '/etc/modprobe.d/cifs.conf', '/etc/modprobe.d/exfat.conf', '/etc/modprobe.d/ext.conf', '/etc/modprobe.d/fat.conf', '/etc/modprobe.d/fscache.conf', '/etc/modprobe.d/fuse.conf', '/etc/modprobe.d/gfs2.conf', '/etc/modprobe.d/nfs_common.conf', '/etc/modprobe.d/nfsd.conf', '/etc/modprobe.d/smbfs_common.conf'],
+                    '1.1.2.1.1': ['/etc/fstab'],
+                    '1.1.2.1.2': ['/etc/fstab'],
+                    '1.1.2.1.3': ['/etc/fstab'],
+                    '1.1.2.1.4': ['/etc/fstab'],
+                    '1.1.2.2.1': ['/etc/fstab'],
+                    '1.1.2.2.2': ['/etc/fstab'],
+                    '1.1.2.2.3': ['/etc/fstab'],
+                    '1.1.2.2.4': ['/etc/fstab'],
+                    '1.1.2.3.1': ['/etc/fstab'],
+                    '1.1.2.3.2': ['/etc/fstab'],
+                    '1.1.2.3.3': ['/etc/fstab'],
+                    '1.1.2.4.1': ['/etc/fstab'],
+                    '1.1.2.4.2': ['/etc/fstab'],
+                    '1.1.2.4.3': ['/etc/fstab'],
+                    '1.1.2.5.1': ['/etc/fstab'],
+                    '1.1.2.5.2': ['/etc/fstab'],
+                    '1.1.2.5.3': ['/etc/fstab'],
+                    '1.1.2.5.4': ['/etc/fstab'],
+                    '1.1.2.6.1': ['/etc/fstab'],
+                    '1.1.2.6.2': ['/etc/fstab'],
+                    '1.1.2.6.3': ['/etc/fstab'],
+                    '1.1.2.6.4': ['/etc/fstab'],
+                    '1.1.2.7.1': ['/etc/fstab'],
+                    '1.1.2.7.2': ['/etc/fstab'],
+                    '1.1.2.7.3': ['/etc/fstab'],
+                    '1.1.2.7.4': ['/etc/fstab'],
+                    '1.2.1.2': ['/etc/dnf/dnf.conf', '/etc/yum.repos.d/**/*.repo'],
+                    '1.2.1.3': ['/etc/dnf/dnf.conf', '/etc/yum.repos.d/**/*.repo'],
+                    '1.3.1.2': ['/boot/efi/EFI/*/grub.cfg', '/boot/efi/EFI/*/grubenv', '/boot/grub2/grub.cfg', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
+                    '1.3.1.3': ['/etc/selinux/config'],
+                    '1.3.1.4': ['/etc/selinux/config'],
+                    '1.3.1.5': ['/etc/selinux/config'],
+                    '1.4.2': ['/boot/efi/EFI/**/*', '/boot/grub2/**/*'],
+                    '1.5.1': ['/etc/sysctl.conf'],
+                    '1.5.2': ['/etc/sysctl.conf'],
+                    '1.5.3': ['/etc/systemd/coredump.conf'],
+                    '1.5.4': ['/etc/systemd/coredump.conf'],
+                    '1.6.1': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/state/**/*'],
+                    '1.6.2': ['/etc/sysconfig/sshd'],
+                    '1.6.3': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SHA1.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.4': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-WEAKMAC.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.5': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHCBC.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.6': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHCHACHA20.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.6.7': ['/etc/crypto-policies/back-ends/*', '/etc/crypto-policies/config', '/etc/crypto-policies/policies/modules/NO-SSHETM.pmod', '/etc/crypto-policies/state/**/*'],
+                    '1.7.1': ['/etc/motd'],
+                    '1.7.2': ['/etc/issue'],
+                    '1.7.3': ['/etc/issue.net'],
+                    '1.7.4': ['/etc/motd'],
+                    '1.7.5': ['/etc/issue'],
+                    '1.7.6': ['/etc/issue.net'],
+                    '2.1.21': ['/etc/postfix/main.cf'],
+                    '2.3.2': ['/etc/chrony.conf'],
+                    '2.3.3': ['/etc/sysconfig/chronyd'],
+                    '2.4.1.2': ['/etc/crontab'],
+                    '2.4.1.3': ['/etc/cron.hourly'],
+                    '2.4.1.4': ['/etc/cron.daily'],
+                    '2.4.1.5': ['/etc/cron.weekly'],
+                    '2.4.1.6': ['/etc/cron.monthly'],
+                    '2.4.1.7': ['/etc/cron.d'],
+                    '2.4.1.8': ['/etc/cron.allow', '/etc/cron.deny'],
+                    '2.4.2.1': ['/etc/at.allow', '/etc/at.deny'],
+                    '3.1.1': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/sysctl.conf'],
+                    '3.1.2': ['/var/lib/NetworkManager/NetworkManager.state'],
+                    '3.2.1': ['/etc/modprobe.d/dccp.conf'],
+                    '3.2.2': ['/etc/modprobe.d/tipc.conf'],
+                    '3.2.3': ['/etc/modprobe.d/rds.conf'],
+                    '3.2.4': ['/etc/modprobe.d/sctp.conf'],
+                    '3.3.1': ['/etc/sysctl.conf'],
+                    '3.3.10': ['/etc/sysctl.conf'],
+                    '3.3.11': ['/etc/sysctl.conf'],
+                    '3.3.2': ['/etc/sysctl.conf'],
+                    '3.3.3': ['/etc/sysctl.conf'],
+                    '3.3.4': ['/etc/sysctl.conf'],
+                    '3.3.5': ['/etc/sysctl.conf'],
+                    '3.3.6': ['/etc/sysctl.conf'],
+                    '3.3.7': ['/etc/sysctl.conf'],
+                    '3.3.8': ['/etc/sysctl.conf'],
+                    '3.3.9': ['/etc/sysctl.conf'],
+                    '4.2.2': ['/etc/firewalld/**/*.xml'],
+                    '5.1.1': ['/etc/ssh/sshd_config', '/etc/ssh/sshd_config.d/*.conf'],
+                    '5.1.10': ['/etc/ssh/sshd_config'],
+                    '5.1.11': ['/etc/ssh/sshd_config'],
+                    '5.1.12': ['/etc/ssh/sshd_config'],
+                    '5.1.13': ['/etc/ssh/sshd_config'],
+                    '5.1.14': ['/etc/ssh/sshd_config'],
+                    '5.1.15': ['/etc/ssh/sshd_config'],
+                    '5.1.16': ['/etc/ssh/sshd_config'],
+                    '5.1.17': ['/etc/ssh/sshd_config'],
+                    '5.1.18': ['/etc/ssh/sshd_config'],
+                    '5.1.19': ['/etc/ssh/sshd_config'],
+                    '5.1.2': ['/etc/ssh/**/ssh_host_*_key'],
+                    '5.1.20': ['/etc/ssh/sshd_config'],
+                    '5.1.21': ['/etc/ssh/sshd_config'],
+                    '5.1.22': ['/etc/ssh/sshd_config'],
+                    '5.1.3': ['/etc/ssh/**/ssh_host_*_key.pub'],
+                    '5.1.7': ['/etc/ssh/sshd_config'],
+                    '5.1.8': ['/etc/ssh/sshd_config'],
+                    '5.1.9': ['/etc/ssh/sshd_config'],
+                    '5.2.2': ['/etc/sudoers'],
+                    '5.2.3': ['/etc/sudoers'],
+                    '5.2.4': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
+                    '5.2.5': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
+                    '5.2.6': ['/etc/sudoers'],
+                    '5.2.7': ['/etc/group', '/etc/gshadow', '/etc/pam.d/su'],
+                    '5.3.3.1.1': ['/etc/security/faillock.conf'],
+                    '5.3.3.1.2': ['/etc/security/faillock.conf'],
+                    '5.3.3.1.3': ['/etc/security/faillock.conf'],
+                    '5.3.3.2.1': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.2': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.3': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.4': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.5': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.6': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.7': ['/etc/security/pwquality.conf'],
+                    '5.3.3.3.1': ['/etc/security/pwhistory.conf'],
+                    '5.3.3.3.2': ['/etc/security/pwhistory.conf'],
+                    '5.4.1.1': ['/etc/login.defs'],
+                    '5.4.1.2': ['/etc/login.defs'],
+                    '5.4.1.3': ['/etc/login.defs'],
+                    '5.4.1.4': ['/etc/libuser.conf', '/etc/login.defs'],
+                    '5.4.1.5': ['/etc/default/useradd'],
+                    '5.4.2.6': ['/root/.bash_profile'],
+                    '5.4.2.7': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '5.4.2.8': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '5.4.3.1': ['/etc/shells'],
+                    '5.4.3.2': ['/etc/profile.d/timeout.sh'],
+                    '5.4.3.3': ['/etc/profile.d/umask.sh'],
+                    '6.1.1': ['/etc/logrotate.d/aide', '/var/lib/aide/aide.db.gz', '/var/lib/aide/aide.db.new.gz'],
+                    '6.1.2': ['/etc/cron.d/*', '/var/spool/cron/root'],
+                    '6.1.3': ['/etc/aide.conf'],
+                    '6.2.1.2': ['/etc/tmpfiles.d/systemd.conf', '/usr/lib/tmpfiles.d/systemd.conf'],
+                    '6.2.1.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.1.2': ['/etc/systemd/journal-upload.conf'],
+                    '6.2.2.2': ['/etc/systemd/journald.conf'],
+                    '6.2.2.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.4': ['/etc/systemd/journald.conf'],
+                    '6.2.3.3': ['/etc/systemd/journald.conf'],
+                    '6.2.3.4': ['/etc/rsyslog.conf'],
+                    '6.2.3.6': ['/etc/rsyslog.conf'],
+                    '6.2.3.7': ['/etc/rsyslog.conf'],
+                    '6.2.3.8': ['/etc/logrotate.conf', '/etc/logrotate.d/**/*'],
+                    '6.2.4.1': ['/var/log/**/*'],
+                    '6.3.1.2': ['/boot/efi/EFI/*/grub.cfg', '/boot/grub2/grub.cfg', '/etc/default/grub'],
+                    '6.3.1.3': ['/boot/efi/EFI/*/grub.cfg', '/boot/grub2/grub.cfg', '/etc/default/grub'],
+                    '6.3.2.1': ['/etc/audit/auditd.conf'],
+                    '6.3.2.2': ['/etc/audit/auditd.conf'],
+                    '6.3.2.3': ['/etc/audit/auditd.conf'],
+                    '6.3.3.1': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.10': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.11': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.12': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.13': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.14': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.15': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.16': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.17': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.18': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.19': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.2': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.20': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.3': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.4': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.5': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.6': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.7': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.8': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.3.9': ['/etc/audit/audit.rules', '/etc/audit/rules.d/99-audit.rules'],
+                    '6.3.4.1': ['/var/log/audit'],
+                    '6.3.4.10': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '6.3.4.2': ['/var/log/audit/**/*'],
+                    '6.3.4.3': ['/var/log/audit/**/*'],
+                    '6.3.4.4': ['/var/log/audit/**/*'],
+                    '6.3.4.5': ['/etc/audit/**/*'],
+                    '6.3.4.6': ['/etc/audit/**/*'],
+                    '6.3.4.7': ['/etc/audit/**/*'],
+                    '6.3.4.8': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '6.3.4.9': ['/sbin/auditctl', '/sbin/auditd', '/sbin/augenrules', '/sbin/aureport', '/sbin/ausearch', '/sbin/autrace'],
+                    '7.1.1': ['/etc/passwd'],
+                    '7.1.10': ['/etc/shells'],
+                    '7.1.11': [],
+                    '7.1.2': ['/etc/passwd-'],
+                    '7.1.3': ['/etc/security/opasswd', '/etc/security/opasswd.old'],
+                    '7.1.4': ['/etc/group'],
+                    '7.1.5': ['/etc/group-'],
+                    '7.1.6': ['/etc/shadow'],
+                    '7.1.7': ['/etc/shadow-'],
+                    '7.1.8': ['/etc/gshadow'],
+                    '7.1.9': ['/etc/gshadow-'],
+                    '7.2.1': ['/etc/passwd'],
+                    '7.2.2': ['/etc/group', '/etc/gshadow', '/etc/passwd', '/etc/shadow', '/etc/subgid', '/etc/subuid'],
+                    '7.2.8': [],
+                    '7.2.9': [],
+                },
+                'custom': {
+                    '1.1.1.9': ['/etc/modprobe.d/cis-unused-filesystems.conf'],
+                    '1.1.2.1.4': ['/etc/fstab'],
+                    '1.3.1.2': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
+                    '1.4.1': ['/boot/grub2/user.cfg'],
+                    '1.4.2': ['/boot/efi/EFI/**/grub*', '/boot/grub2/grub*', '/boot/grub2/user.cfg'],
+                    '1.7.3': ['/etc/issue.net'],
+                    '2.4.1.7': ['/etc/cron.d'],
+                    '2.4.1.8': ['/etc/cron.allow', '/etc/cron.deny'],
+                    '3.1.1': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf'],
+                    '4.1.1': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.1': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.2': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '4.3.3': ['/etc/nftables', '/etc/nftables/cis-rhel9.nft', '/etc/sysconfig/nftables.conf'],
+                    '5.1.9': ['/etc/ssh/sshd_config'],
+                    '5.3.3.2.1': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.4': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.5': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
+                    '5.3.3.2.7': ['/etc/security/pwquality.conf'],
+                    '5.3.3.3.2': ['/etc/security/pwhistory.conf'],
+                    '5.3.3.3.3': [],
+                    '5.3.3.4.1': [],
+                    '5.4.1.3': ['/etc/login.defs', '/etc/shadow'],
+                    '5.4.2.5': ['/root/bin'],
+                    '6.1.2': ['/etc/cron.d/*', '/etc/crontab', '/etc/systemd/system/aidecheck.service', '/etc/systemd/system/aidecheck.timer', '/var/spool/cron/root'],
+                    '6.1.3': ['/etc/aide.conf'],
+                    '6.2.1.2': ['/etc/tmpfiles.d/systemd.conf', '/run/log/journal/**/*.journal', '/run/log/journal/**/*.journal~', '/var/log/journal/**/*.journal', '/var/log/journal/**/*.journal~'],
+                    '6.2.1.3': ['/etc/systemd/journald.conf'],
+                    '6.2.2.1.2': ['/etc/systemd/journal-upload.conf.d', '/etc/systemd/journal-upload.conf.d/60-cis-auth.conf'],
+                    '6.2.3.8': ['/etc/logrotate.d/rsyslog'],
+                    '7.1.11': [],
+                    '7.1.12': [],
+                },
+            }
+            selected=set(custom_ids+collection_ids)
+            targets=collections.defaultdict(set);aliases=collections.defaultdict(set)
+            def excluded(path):
+                path=os.path.normpath(path)
+                if any(path == root or path.startswith(root+'/') for root in ('/tmp','/var/tmp','/dev/shm','/run','/var/run')):return True
+                return any(fnmatch.fnmatch(part,pattern) for part in pathlib.Path(path).parts
+                           for pattern in ('backup_CIS_remediation_*','*-backup_CIS_remediation_*',
+                                           '.cis_prechange_*','ansible-tmp-*','.ansible*','*.tmp','*.temp',
+                                           '*.swp','*.swo','.#*','*~'))
+            def add(path,control):
+                if not os.path.isabs(path):raise ValueError('Backup target must be absolute: '+path)
+                if excluded(path):return
+                name=os.path.basename(path)
+                if name.startswith(('backup_CIS_remediation_','.cis_prechange_')) or '-backup_CIS_remediation_' in name:return
+                # Back up the real file beside its physical target, never a directory or device.
+                alias=path;path=os.path.realpath(path)
+                if excluded(path):return
+                try:info=os.stat(path)
+                except FileNotFoundError:return
+                if stat.S_ISREG(info.st_mode):
+                    targets[path].add(control);aliases[path].add(alias)
+            def patterns(values,control):
+                for pattern in values:
+                    for path in glob.glob(pattern,recursive=True):add(path,control)
+            for kind,ids in [('custom',custom_ids),('collection',collection_ids)]:
+                for control in ids:patterns(maps[kind].get(control,[]),control)
+            if '5.1.20' in custom_ids:
+                # SSH Include paths are relative to /etc/ssh, including nested Includes.
+                todo=[config.get('sshd_config_file','/etc/ssh/sshd_config')];seen=set()
+                base=config.get('sshd_config_dir','/etc/ssh')
+                while todo:
+                    path=todo.pop()
+                    if not os.path.isabs(path):raise ValueError('sshd configuration path must be absolute')
+                    physical=os.path.realpath(path)
+                    if physical in seen:continue
+                    seen.add(physical)
+                    if not os.path.isfile(physical):raise ValueError('sshd configuration missing: '+path)
+                    add(path,'5.1.20')
+                    for line in pathlib.Path(physical).read_text().splitlines():
+                        match=re.match(r'^[ \t]*Include(?:[ \t]+|[ \t]*=[ \t]*)(.*)$',line,re.I)
+                        if not match:continue
+                        for pattern in shlex.split(match.group(1),comments=True):
+                            if not os.path.isabs(pattern):pattern=os.path.join(base,pattern)
+                            todo.extend(sorted(glob.glob(pattern)))
+            pam={'5.3.2.1','5.3.2.2','5.3.2.4','5.3.3.3.3','5.3.3.4.1'} & selected
+            if pam:
+                result=subprocess.run(['authselect','current','--raw'],capture_output=True,text=True,timeout=30)
+                if result.returncode:raise ValueError('Cannot identify active authselect profile for backup: '+result.stderr.strip())
+                tokens=result.stdout.split()
+                if not tokens:raise ValueError('No active authselect profile returned for backup')
+                profile=tokens[0]
+                if '/' in profile and not profile.startswith('custom/'):raise ValueError('Unsupported authselect profile path')
+                if '..' in profile or profile.startswith('/'):raise ValueError('Unsafe authselect profile path')
+                files=['/etc/authselect/authselect.conf','/etc/authselect/system-auth','/etc/authselect/password-auth',
+                       '/etc/authselect/fingerprint-auth','/etc/authselect/smartcard-auth','/etc/authselect/postlogin',
+                       '/etc/authselect/nsswitch.conf','/etc/authselect/user-nsswitch.conf',
+                       '/etc/authselect/dconf-db','/etc/authselect/dconf-locks','/etc/nsswitch.conf',
+                       '/etc/pam.d/system-auth','/etc/pam.d/password-auth','/etc/pam.d/fingerprint-auth',
+                       '/etc/pam.d/smartcard-auth','/etc/pam.d/postlogin',
+                       '/etc/dconf/db/distro','/etc/dconf/db/distro.d/20-authselect',
+                       '/etc/dconf/db/distro.d/locks/20-authselect']
+                if profile.startswith('custom/'):
+                    files += ['/etc/authselect/'+profile+'/system-auth','/etc/authselect/'+profile+'/password-auth']
+                for control in pam:patterns(files,control)
+            if '1.2.1.4' in custom_ids:
+                for repository in config.get('repositories',[]):
+                    add('/etc/yum.repos.d/'+repository['id']+'.repo','1.2.1.4')
+            if '6.1.2' in collection_ids:
+                cron=config.get('aide_cron_file','aide')
+                add(cron if cron.startswith('/') else '/etc/cron.d/'+cron,'6.1.2')
+            if '7.1.12' in custom_ids:
+                for entry in config.get('unowned_paths',[]):
+                    path=entry['path'];add(path,'7.1.12')
+                    if entry.get('recurse') and os.path.isdir(path):
+                        for directory,dirs,files in os.walk(path,followlinks=False):
+                            dirs[:]=[d for d in dirs if not d.startswith('.cis_prechange_')]
+                            for name in files:add(os.path.join(directory,name),'7.1.12')
+            if '7.2.9' in selected:
+                shells={line.strip() for line in pathlib.Path('/etc/shells').read_text().splitlines()
+                        if line.startswith('/') and os.path.basename(line.strip())!='nologin'}
+                for line in pathlib.Path('/etc/passwd').read_text().splitlines():
+                    fields=line.split(':')
+                    if len(fields)!=7 or fields[6] not in shells or not os.path.isdir(fields[5]):continue
+                    home=fields[5];device=os.stat(home).st_dev
+                    def walk_error(error):raise error
+                    for directory,dirs,files in os.walk(home,followlinks=False,onerror=walk_error):
+                        dirs[:]=[d for d in dirs if os.lstat(os.path.join(directory,d)).st_dev==device]
+                        for name in files:
+                            path=os.path.join(directory,name)
+                            if name.startswith('.') and not os.path.islink(path):add(path,'7.2.9')
+            if '7.1.11' in selected:
+                roots=['/']
+                if '7.1.11' in custom_ids:
+                    result=subprocess.run(['findmnt','-rn','-t','ext2,ext3,ext4,xfs,btrfs','-o','TARGET'],capture_output=True,text=True)
+                    if result.returncode:raise ValueError('Cannot discover local mounts for file backups')
+                    roots=result.stdout.splitlines()
+                for base in roots:
+                    result=subprocess.run(['find',base,'-xdev','-type','f','-perm','-0002','-print0'],capture_output=True)
+                    if result.returncode:raise ValueError('Cannot identify world-writable files for backup: '+os.fsdecode(result.stderr))
+                    for path in result.stdout.split(b'\0'):
+                        if path:add(os.fsdecode(path),'7.1.11')
+            # Optional site-specific configuration paths, without modifying the collection.
+            for control,paths in config.get('extra_paths',{}).items():
+                if control in selected:patterns(paths,control)
+            print(json.dumps([{'path':path,'control_ids':sorted(ids),'aliases':sorted(aliases[path])} for path,ids in sorted(targets.items())]))
+        except (OSError,ValueError,subprocess.TimeoutExpired) as error:
+            print('Cannot plan pre-remediation file backups: '+str(error),file=sys.stderr)
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_CUSTOM_IDS: '{{ cis_custom_remediation_ids | default([]) | to_json }}'
+      CIS_BACKUP_COLLECTION_IDS: '{{ cis_collection_remediation_ids | default([]) | to_json }}'
+      CIS_BACKUP_CONFIG: '{{ {''sshd_config_file'': cis_sshd_config_file | default(''/etc/ssh/sshd_config''), ''sshd_config_dir'':
+        cis_sshd_config_dir | default(''/etc/ssh''), ''unowned_paths'': cis_unowned_path_ownership | default([]),
+        ''aide_cron_file'': rhel9cis_aide_cron_file | default(''aide''), ''repositories'': cis_repository_definitions
+        | default([]), ''extra_paths'': cis_backup_extra_paths_by_control | default({})} | to_json }}'
+    tags:
+    - cis_backup_prepare
+    register: cis_prechange_backup_plan
+    changed_when: false
+    check_mode: false
+  - name: Prepare private pre-change file snapshots
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
 
-cis_remote_login_banner_text: |-
-  ************************************************
-  *This system is for authorized users only. Any *
-  *unauthorized access attempts will be logged,  *
-  *and offenders will be prosecuted!             *
-  *                                              *
-  * You have been warned!                        *
-  *                                              *
-  *Thank You,                                    *
-  *The Management                                *
-  ************************************************
-cis_gdm_login_banner_text: |-
-  ************************************************
-  *This system is for authorized users only. Any *
-  *unauthorized access attempts will be logged,  *
-  *and offenders will be prosecuted!             *
-  *                                              *
-  * You have been warned!                        *
-  *                                              *
-  *Thank You,                                    *
-  *The Management                                *
-  ************************************************
-cis_gdm_scope: server_without_gdm
-cis_approved_listening_services:
-  - tcp:22
-  - tcp:25
-  - tcp:111
-  - tcp:139
-  - tcp:445
-  - tcp:1270
-  - udp:111
-  - udp:323
-cis_approved_firewalld_services: []
-cis_approved_firewalld_ports: []
-cis_chrony_sources:
-  - name: 10.0.0.2
-    options:
-      - minpoll 8
-      - iburst
-cis_ipv6_policy: enabled
-cis_ipv6_disable_method: kernel
-cis_firewall_backend: disabled
-cis_nftables_policy_configured: false
-cis_nftables_management_sources: []
-cis_nftables_management_ipv6_sources: []
-cis_nftables_management_tcp_ports:
-  - 22
-cis_nftables_allowed_tcp_ports: []
-cis_nftables_allowed_udp_ports: []
-cis_passwd_warn_days: 7
-cis_nftables_additional_input_rules: []
-cis_nftables_allow_icmp: true
-cis_ssh_legacy_client_exception: false
-cis_ssh_access_policy_configured: false
-cis_ssh_allowed_users: []
-cis_ssh_allowed_groups: []
-cis_ssh_denied_users: []
-cis_ssh_denied_groups: []
-cis_ssh_client_alive_interval: 15
-cis_ssh_client_alive_count_max: 3
-cis_sudo_log_file: /var/log/sudo.log
-cis_password_failed_attempts: 5
-cis_password_unlock_time: 900
-cis_password_min_length: 14
-cis_password_min_classes: 4
-cis_password_history: 24
-cis_password_warning_days: 7
-cis_shell_timeout: 900
-cis_logging_backend: rsyslog
-cis_journald_system_max_use: 1G
-cis_journald_system_keep_free: 500M
-cis_journald_runtime_max_use: 200M
-cis_journald_runtime_keep_free: 50M
-cis_journald_max_file_sec: 1month
-cis_journald_rotation:
-  SystemMaxUse: 1G
-  SystemKeepFree: 500M
-  RuntimeMaxUse: 200M
-  RuntimeKeepFree: 50M
-  MaxFileSec: 1month
-cis_journal_upload_enabled: false
-cis_journal_upload_policy_configured: true
-cis_journal_upload_url: ''
-cis_journal_upload_server_key_file: ''
-cis_journal_upload_server_certificate_file: ''
-cis_journal_upload_trusted_certificate_file: ''
-cis_rsyslog_required_routes: []
-cis_rsyslog_policy_configured: false
-cis_remote_log_host: ''
-cis_remote_log_port: 514
-cis_remote_log_protocol: tcp
-cis_rsyslog_rotation_frequency: daily
-cis_rsyslog_rotation_count: 4
-cis_application_log_exceptions: []
-cis_log_file_policy_configured: false
-cis_approved_world_writable_paths: []
-cis_approved_unowned_paths: []
-cis_approved_suid_sgid_paths: []
-cis_local_interactive_users: []
-cis_filesystem_review_completed: true
-cis_privileged_file_inventory_completed: false
-cis_interactive_user_review_completed: true
-cis_authselect_custom_profile: cis-hardening
-cis_aide_cron_hour: '5'
-cis_aide_cron_minute: '0'
-cis_unowned_path_ownership: []
-cis_journal_file_policy_configured: true
-cis_journal_file_mode: '0640'
-cis_journald_rotation_policy_configured: true
-cis_requested_control_ids: []
-cis_password_difok: 2
-cis_password_maxrepeat: 3
-cis_password_maxsequence: 3
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        entries=[]
+        try:
+            stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
+            for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+                path=item['path']
+                if path in retained:
+                    if not os.path.isfile(retained[path]['backup_file']):
+                        raise ValueError('Original backup is missing: '+retained[path]['backup_file'])
+                    continue
+                before=fingerprint(path)
+                if before is None:continue
+                directory=tempfile.mkdtemp(prefix='.cis_prechange_'+stamp+'_',dir=os.path.dirname(path))
+                os.chmod(directory,0o700)
+                name='backup_CIS_remediation_'+os.path.basename(path)+'_'+stamp+'.bak'
+                entry=dict(item,before=before,directory=directory,snapshot=os.path.join(directory,name),
+                           destination=os.path.join(os.path.dirname(path),name))
+                entries.append(entry)
+                # Anchor writes to a private directory descriptor; never follow a replaced snapshot link.
+                directory_fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:
+                    source_fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+                    with os.fdopen(source_fd,'rb') as source:
+                        source_info=os.fstat(source.fileno())
+                        if not stat.S_ISREG(source_info.st_mode):raise ValueError('Snapshot source is not a regular file: '+path)
+                        target_fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory_fd)
+                        with os.fdopen(target_fd,'wb') as target:
+                            shutil.copyfileobj(source,target)
+                            target.flush()
+                            os.fchown(target.fileno(),before[2],before[3]);os.fchmod(target.fileno(),before[1])
+                            attributes={key:base64.b64decode(value) for key,value in before[5]}
+                            for key in os.listxattr(target.fileno()):
+                                if key not in attributes:os.removexattr(target.fileno(),key)
+                            for key,value in attributes.items():os.setxattr(target.fileno(),key,value)
+                            os.utime(target.fileno(),ns=(source_info.st_atime_ns,before[4]))
+                finally:
+                    os.close(directory_fd)
+                if fingerprint(path)!=before or fingerprint(entry['snapshot'])!=before:
+                    raise ValueError('Snapshot mismatch or concurrent file change: '+path)
+            print(json.dumps({'entries':entries}))
+        except (OSError,ValueError) as error:
+            for entry in entries:
+                shutil.rmtree(entry['directory'],ignore_errors=True)
+            print('Cannot prepare pre-change snapshots: '+str(error),file=sys.stderr)
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
+    register: cis_backup_prepare_result
+    changed_when: false
+    when: not ansible_check_mode
+    tags:
+    - cis_backup_prepare
+  - name: Save prepared backup transaction
+    ansible.builtin.set_fact:
+      cis_backup_transaction: '{{ cis_backup_prepare_result.stdout | from_json }}'
+      cis_backup_transaction_ready: true
+    when: not ansible_check_mode
+  - name: Load collection rule reset values
+    ansible.builtin.include_vars:
+      file: '{{ role_path }}/vars/disable_all.yml'
+      name: cis_rule_reset_map
+  - name: Reset collection rules at fact precedence
+    ansible.builtin.set_fact: null
+    args: '{{ cis_rule_reset_map }}'
+  - name: Enable only non-compliant collection controls
+    ansible.builtin.set_fact:
+      '{{ ''rhel9cis_rule_'' ~ (item | replace(''.'', ''_'')) ~ ''_enabled'' }}': true
+    loop: '{{ cis_collection_remediation_ids }}'
+    loop_control:
+      label: '{{ item }}'
+  - name: Display enabled collection remediation controls
+    ansible.builtin.debug:
+      var: cis_collection_remediation_ids
+  - name: 1.4.1 | Configure GRUB bootloader password
+    when: '''1.4.1'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 1.4.1 | Confirm GRUB password was supplied
+      ansible.builtin.assert:
+        that:
+        - rhel9cis_bootloader_password | default('') | length > 0
+        - '''CHANGE_ME'' not in (rhel9cis_bootloader_password | default(''''))'
+        fail_msg: Configure rhel9cis_bootloader_password in the encrypted config/cis_unix_team_inputs.yml file.
+      no_log: true
+    - name: 1.4.1 | Check grub2-setpassword command
+      ansible.builtin.stat:
+        path: /usr/sbin/grub2-setpassword
+      register: cis_grub2_setpassword_command
+    - name: 1.4.1 | Check canonical GRUB directory
+      ansible.builtin.stat:
+        path: /boot/grub2
+      register: cis_grub2_directory
+    - name: 1.4.1 | Confirm GRUB prerequisites
+      ansible.builtin.assert:
+        that:
+        - cis_grub2_setpassword_command.stat.exists
+        - cis_grub2_setpassword_command.stat.executable
+        - cis_grub2_directory.stat.exists
+        - cis_grub2_directory.stat.isdir
+        fail_msg: /usr/sbin/grub2-setpassword or /boot/grub2 is unavailable. Confirm that the RHEL 9 GRUB tools
+          are installed.
+    - name: 1.4.1 | Generate GRUB PBKDF2 password in canonical directory
+      ansible.builtin.expect:
+        command: /usr/sbin/grub2-setpassword --output=/boot/grub2
+        responses:
+          '(?i)Enter password:': '{{ rhel9cis_bootloader_password }}'
+          '(?i)Confirm password:': '{{ rhel9cis_bootloader_password }}'
+        timeout: 30
+      register: cis_grub2_setpassword_result
+      changed_when: cis_grub2_setpassword_result.rc == 0
+      no_log: true
+    - name: 1.4.1 | Read generated GRUB password file status
+      ansible.builtin.stat:
+        path: /boot/grub2/user.cfg
+      register: cis_grub_user_cfg
+    - name: 1.4.1 | Verify generated GRUB PBKDF2 entry
+      ansible.builtin.command:
+        argv:
+        - /usr/bin/grep
+        - -Eq
+        - ^GRUB2_PASSWORD=grub\.pbkdf2\.sha512\.
+        - /boot/grub2/user.cfg
+      register: cis_grub_password_hash_check
+      changed_when: false
+      failed_when: false
+      when: cis_grub_user_cfg.stat.exists
+    - name: 1.4.1 | Confirm GRUB password remediation completed
+      ansible.builtin.assert:
+        that:
+        - cis_grub_user_cfg.stat.exists
+        - cis_grub_password_hash_check.rc | default(1) == 0
+        fail_msg: grub2-setpassword did not create a valid PBKDF2 entry in /boot/grub2/user.cfg.
+    - name: 1.4.1 | Secure generated GRUB password file
+      ansible.builtin.file:
+        path: /boot/grub2/user.cfg
+        owner: root
+        group: root
+        mode: '0600'
+  - name: 1.4.2 | Check UEFI GRUB configuration directory
+    when: '''1.4.2'' in cis_custom_remediation_ids'
+    become: true
+    ansible.builtin.stat:
+      path: /boot/efi/EFI
+    register: cis_uefi_grub_directory
+  - name: 1.4.2 | Find UEFI GRUB configuration files
+    when:
+    - '''1.4.2'' in cis_custom_remediation_ids'
+    - cis_uefi_grub_directory.stat.exists
+    become: true
+    ansible.builtin.find:
+      paths: /boot/efi/EFI
+      patterns: grub*
+      file_type: file
+      recurse: true
+    register: cis_uefi_grub_files
+  - name: 1.4.2 | Secure UEFI GRUB configuration files
+    when:
+    - '''1.4.2'' in cis_custom_remediation_ids'
+    - cis_uefi_grub_directory.stat.exists
+    become: true
+    ansible.builtin.file:
+      path: '{{ item.path }}'
+      owner: root
+      group: root
+      mode: '0700'
+      follow: false
+    loop: '{{ cis_uefi_grub_files.files | default([]) }}'
+    loop_control:
+      label: '{{ item.path }}'
+  - name: 1.4.2 | Check BIOS GRUB configuration directory
+    when: '''1.4.2'' in cis_custom_remediation_ids'
+    become: true
+    ansible.builtin.stat:
+      path: /boot/grub2
+    register: cis_bios_grub_directory
+  - name: 1.4.2 | Find BIOS GRUB configuration files
+    when:
+    - '''1.4.2'' in cis_custom_remediation_ids'
+    - cis_bios_grub_directory.stat.exists
+    become: true
+    ansible.builtin.find:
+      paths: /boot/grub2
+      patterns:
+      - grub*
+      - user.cfg
+      file_type: file
+      recurse: false
+    register: cis_bios_grub_files
+  - name: 1.4.2 | Secure BIOS GRUB configuration files
+    when:
+    - '''1.4.2'' in cis_custom_remediation_ids'
+    - cis_bios_grub_directory.stat.exists
+    become: true
+    ansible.builtin.file:
+      path: '{{ item.path }}'
+      owner: root
+      group: root
+      mode: '0600'
+      follow: false
+    loop: '{{ cis_bios_grub_files.files | default([]) }}'
+    loop_control:
+      label: '{{ item.path }}'
+  - name: 5.4.2.5 | Create secure root bin directory
+    when:
+    - '''5.4.2.5'' in cis_custom_remediation_ids'
+    - cis_root_bin_action | default('create') == 'create'
+    become: true
+    ansible.builtin.file:
+      path: /root/bin
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+  - name: 5.4.2.5 | Verify root PATH integrity after remediation
+    when: '''5.4.2.5'' in cis_custom_remediation_ids'
+    become: true
+    ansible.builtin.shell: |
+      root_path="$(sudo -Hiu root env | awk -F= '$1 == "PATH" {print $2; exit}')"
+      [ -n "$root_path" ] || { echo 'Unable to determine root PATH'; exit 2; }
+
+      failed=0
+      case "$root_path" in
+        *::*|:*|*:) echo "Invalid empty root PATH entry: $root_path"; failed=1 ;;
+      esac
+
+      old_ifs="$IFS"
+      IFS=:
+      for directory in $root_path; do
+        IFS="$old_ifs"
+        [ "$directory" = . ] && { echo 'Root PATH contains dot'; failed=1; IFS=:; continue; }
+        [ -d "$directory" ] || { echo "$directory is not a directory"; failed=1; IFS=:; continue; }
+        owner="$(stat -Lc '%U' "$directory")"
+        mode="$(stat -Lc '%a' "$directory")"
+        echo "$directory owner=$owner mode=$mode"
+        [ "$owner" = root ] || failed=1
+        [ "$((8#$mode & 8#022))" -eq 0 ] || failed=1
+        IFS=:
+      done
+      IFS="$old_ifs"
+      exit "$failed"
+    args:
+      executable: /bin/bash
+    changed_when: false
+  - name: 5.1.9 | Configure effective SSH client alive settings
+    when: '''5.1.9'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.1.9 | Place SSH settings before Include and Match statements
+      ansible.builtin.blockinfile:
+        path: /etc/ssh/sshd_config
+        marker: '# {mark} ANSIBLE MANAGED CIS 5.1.9'
+        insertbefore: BOF
+        block: |
+          ClientAliveInterval {{ cis_ssh_client_alive_interval }}
+          ClientAliveCountMax {{ cis_ssh_client_alive_count_max }}
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+        validate: /usr/sbin/sshd -t -f %s
+      register: cis_sshd_client_alive_change
+    - name: 5.1.9 | Reload sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: reloaded
+      when: cis_sshd_client_alive_change.changed
+  - name: Configure authselect features while preserving the active provider
+    become: true
+    when: cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.2', '5.3.2.4', '5.3.3.3.3']) | length > 0
+    block:
+    - name: PAM | Require valid managed configuration before changes
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: PAM | Read active profile and existing features
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_pam_before
+      changed_when: false
+    - name: PAM | Require an active profile
+      ansible.builtin.assert:
+        that:
+        - cis_pam_before.stdout.split() | length > 0
+    - name: PAM | Record expected active profile
+      ansible.builtin.set_fact:
+        cis_pam_expected_profile: '{{ cis_pam_before.stdout.split()[0] }}'
+    - name: 5.3.2.1 | Use a custom profile as specified in the CIS solution
+      when: '''5.3.2.1'' in cis_custom_remediation_ids'
+      block:
+      - name: 5.3.2.1 | Preserve the existing profile when already custom
+        ansible.builtin.set_fact:
+          cis_pam_expected_profile: '{{ cis_pam_before.stdout.split()[0] }}'
+      - name: 5.3.2.1 | Create a custom profile from the active provider when required
+        when: not cis_pam_before.stdout.split()[0].startswith('custom/')
+        block:
+        - name: 5.3.2.1 | Choose a fresh custom profile name
+          ansible.builtin.set_fact:
+            cis_pam_copy_name: '{{ cis_authselect_custom_profile }}-{{ now(utc=true, fmt=''%Y%m%dT%H%M%S%fZ'') }}'
+        - name: 5.3.2.1 | Validate profile name
+          ansible.builtin.assert:
+            that:
+            - cis_pam_copy_name is match('^[A-Za-z0-9_-]+$')
+        - name: 5.3.2.1 | Copy the active provider without PAM symlinks
+          ansible.builtin.command:
+            argv:
+            - authselect
+            - create-profile
+            - '{{ cis_pam_copy_name }}'
+            - --base-on
+            - '{{ cis_pam_before.stdout.split()[0] }}'
+            - --symlink-meta
+          changed_when: true
+        - name: 5.3.2.1 | Set derived custom profile
+          ansible.builtin.set_fact:
+            cis_pam_expected_profile: '{{ ''custom/'' ~ cis_pam_copy_name }}'
+        - name: 5.3.2.1 | Preview copied profile before selection
+          ansible.builtin.command:
+            argv:
+            - python3
+            - -c
+            - |-
+              import os,pathlib,re,subprocess,sys
+              try:
+                  args=['authselect','test',os.environ['CIS_PAM_TARGET']]+os.environ['CIS_PAM_FEATURES'].split()
+                  result=subprocess.run(args,capture_output=True,text=True)
+                  if result.returncode: raise ValueError(result.stderr.strip() or 'authselect test failed')
+                  sections={};active=None
+                  for line in result.stdout.splitlines():
+                      match=re.fullmatch(r'File (/[^:]+):',line.strip())
+                      if match:
+                          active=match.group(1);sections[active]=[]
+                      elif active is not None: sections[active].append(line)
+                  required=['/etc/pam.d/system-auth','/etc/pam.d/password-auth','/etc/nsswitch.conf']
+                  if any(p not in sections for p in required):
+                      raise ValueError('Cannot identify required authselect preview sections; no activation attempted')
+                  paths=required+[p for p in sections if p.startswith('/etc/pam.d/') and p not in required]
+                  def normal(lines):
+                      rows=[]
+                      for line in lines:
+                          words=line.split('#',1)[0].split()
+                          if not words: continue
+                          if len(words)>2 and words[0]=='password' and words[2]=='pam_pwhistory.so':
+                              words=[x for x in words if x!='use_authtok']
+                          rows.append(words)
+                      return rows
+                  for filename in paths:
+                      if normal(pathlib.Path(filename).read_text().splitlines())!=normal(sections[filename]):
+                          raise ValueError('Unexpected changes beyond pwhistory use_authtok in '+filename)
+                  print('Preview verified: only use_authtok changes permitted; PAM provider, stack order and NSS maps preserved')
+              except (OSError,ValueError) as error:
+                  print(str(error),file=sys.stderr);sys.exit(2)
+          environment:
+            CIS_PAM_TARGET: '{{ cis_pam_expected_profile }}'
+            CIS_PAM_FEATURES: '{{ cis_pam_before.stdout.split()[1:] | join('' '') }}'
+          changed_when: false
+        - name: 5.3.2.1 | Select the custom profile with existing features and backup
+          ansible.builtin.command:
+            argv: '{{ [''authselect'', ''select'', cis_pam_expected_profile] + cis_pam_before.stdout.split()[1:]
+              }}'
+          changed_when: true
+    - name: PAM | Determine requested features
+      ansible.builtin.set_fact:
+        cis_pam_required_features: |-
+          {{ (['with-faillock'] if cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.2']) | length > 0 else [])
+             + (['with-pwhistory'] if cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.4', '5.3.3.3.3']) | length > 0 else []) }}
+    - name: PAM | Inspect conditional module entries as specified in the CIS solution
+      ansible.builtin.command:
+        argv: '{{ [''python3'', ''-c'', cis_feature_inspection_code, cis_pam_expected_profile] + cis_pam_required_features
+          }}'
+      vars:
+        cis_feature_inspection_code: |-
+          import json,pathlib,re,sys
+          try:
+              profile=sys.argv[1]
+              if not re.fullmatch(r'(?:custom/)?[A-Za-z0-9_.-]+',profile): raise ValueError('Invalid profile ID')
+              candidates=[pathlib.Path('/etc/authselect')/profile] if profile.startswith('custom/') else [pathlib.Path('/usr/share/authselect/default')/profile,pathlib.Path('/usr/share/authselect/vendor')/profile]
+              directory=next((p for p in candidates if p.is_dir()),candidates[0])
+              required=[]
+              for feature in sys.argv[2:]:
+                  module='pam_'+feature.removeprefix('with-')+'.so'
+                  conditional=False
+                  for filename in ('system-auth','password-auth'):
+                      lines=[s.split('#',1)[0].strip() for s in (directory/filename).read_text().splitlines()]
+                      lines=[s for s in lines if re.search(r'(?<![\w.])'+re.escape(module)+r'(?=\s|$)',s)]
+                      if not lines: raise ValueError('Missing '+module+' template entries; complete control 5.3.2.1 first')
+                      conditional=conditional or any('{include if "'+feature+'"}' in s for s in lines)
+                  if conditional: required.append(feature)
+              print(json.dumps(required))
+          except (OSError,ValueError) as error:
+              print(str(error),file=sys.stderr);sys.exit(2)
+      register: cis_pam_conditional_features
+      changed_when: false
+    - name: PAM | Enable features only for conditional module entries
+      ansible.builtin.set_fact:
+        cis_pam_required_features: '{{ cis_pam_conditional_features.stdout | from_json }}'
+    - name: PAM | Read supported features for active profile
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - list-features
+        - '{{ cis_pam_before.stdout.split()[0] }}'
+      register: cis_pam_supported
+      changed_when: false
+    - name: PAM | Require supported features before any changes
+      ansible.builtin.assert:
+        that:
+        - cis_pam_required_features | difference(cis_pam_supported.stdout.split()) | length == 0
+        fail_msg: Required features are unsupported by the active profile. Review its templates without changing
+          the authentication provider.
+    - name: PAM | Record existing Winbind integration
+      ansible.builtin.command:
+        argv:
+        - grep
+        - -Eq
+        - ^[ \t]*[^#]*pam_winbind[.]so
+        - '{{ item }}'
+      loop:
+      - /etc/authselect/system-auth
+      - /etc/authselect/password-auth
+      register: cis_pam_winbind_before
+      changed_when: false
+      failed_when: cis_pam_winbind_before.rc not in [0, 1]
+    - name: PAM | Enable missing features with native authentication backup
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - enable-feature
+        - '{{ item }}'
+      loop: '{{ cis_pam_required_features | difference(cis_pam_before.stdout.split()[1:]) }}'
+      changed_when: true
+    - name: PAM | Apply authselect changes as specified in the CIS solution
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - apply-changes
+      changed_when: false
+    - name: PAM | Verify managed configuration
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: PAM | Read resulting profile and features
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_pam_after
+      changed_when: false
+    - name: PAM | Verify provider and feature preservation
+      ansible.builtin.assert:
+        that:
+        - cis_pam_after.stdout.split() | length > 0
+        - cis_pam_after.stdout.split()[0] == cis_pam_expected_profile
+        - (cis_pam_before.stdout.split()[1:] + cis_pam_required_features) | difference(cis_pam_after.stdout.split()[1:])
+          | length == 0
+    - name: PAM | Verify existing Winbind integration remains present
+      ansible.builtin.command:
+        argv:
+        - grep
+        - -Eq
+        - ^[ \t]*[^#]*pam_winbind[.]so
+        - '{{ item.item }}'
+      loop: '{{ cis_pam_winbind_before.results }}'
+      when: item.rc == 0
+      changed_when: false
+    - name: PAM | Verify SSH configuration syntax
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+      changed_when: false
+  - name: 5.3.2.2 | Verify enabled module entries in both PAM files
+    become: true
+    ansible.builtin.shell: |
+      python3 - <<'CIS_PAM_AUDIT'
+      import pathlib,re,subprocess,sys
+      try:
+          integrity=subprocess.run(['authselect','check'],capture_output=True,text=True)
+          print(integrity.stdout.strip())
+          if integrity.returncode:
+              print(integrity.stderr.strip())
+              print('NON_COMPLIANT: invalid authselect configuration')
+              sys.exit(1)
+          requirements=[('auth', 'required|requisite', 'pam_faillock.so', 'preauth'), ('auth', 'required|requisite', 'pam_faillock.so', 'authfail'), ('account', 'required|requisite', 'pam_faillock.so', None)]
+          failed=False
+          for filename in ('/etc/pam.d/system-auth','/etc/pam.d/password-auth'):
+              lines=[s.split('#',1)[0].strip() for s in pathlib.Path(filename).read_text().splitlines()]
+              for stack,controls,module,option in requirements:
+                  pattern=r'^'+stack+r'\s+(?:'+controls+r')\s+'+re.escape(module)+r'(?=\s|$)'
+                  matches=[line for line in lines if re.search(pattern,line)]
+                  good=bool(matches)
+                  if option:
+                      option_matches=[option in line.split() for line in matches]
+                      good=good and (any(option_matches) if module=='pam_faillock.so' else all(option_matches))
+                  print(f'{filename}: stack={stack} module={module} option={option or "none"} pass={good}')
+                  for line in matches: print('  '+line)
+                  failed=failed or not good
+          sys.exit(1 if failed else 0)
+      except (OSError,ValueError) as error:
+          print('VALIDATION_ERROR: '+str(error))
+          sys.exit(2)
+      CIS_PAM_AUDIT
+    args:
+      executable: /bin/bash
+    changed_when: false
+    when: cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.2']) | length > 0
+  - name: 5.3.2.4 | Verify enabled module entries in both PAM files
+    become: true
+    ansible.builtin.shell: |
+      python3 - <<'CIS_PAM_AUDIT'
+      import pathlib,re,subprocess,sys
+      try:
+          integrity=subprocess.run(['authselect','check'],capture_output=True,text=True)
+          print(integrity.stdout.strip())
+          if integrity.returncode:
+              print(integrity.stderr.strip())
+              print('NON_COMPLIANT: invalid authselect configuration')
+              sys.exit(1)
+          requirements=[('password', 'required|requisite', 'pam_pwhistory.so', None)]
+          failed=False
+          for filename in ('/etc/pam.d/system-auth','/etc/pam.d/password-auth'):
+              lines=[s.split('#',1)[0].strip() for s in pathlib.Path(filename).read_text().splitlines()]
+              for stack,controls,module,option in requirements:
+                  pattern=r'^'+stack+r'\s+(?:'+controls+r')\s+'+re.escape(module)+r'(?=\s|$)'
+                  matches=[line for line in lines if re.search(pattern,line)]
+                  good=bool(matches)
+                  if option:
+                      option_matches=[option in line.split() for line in matches]
+                      good=good and (any(option_matches) if module=='pam_faillock.so' else all(option_matches))
+                  print(f'{filename}: stack={stack} module={module} option={option or "none"} pass={good}')
+                  for line in matches: print('  '+line)
+                  failed=failed or not good
+          sys.exit(1 if failed else 0)
+      except (OSError,ValueError) as error:
+          print('VALIDATION_ERROR: '+str(error))
+          sys.exit(2)
+      CIS_PAM_AUDIT
+    args:
+      executable: /bin/bash
+    changed_when: false
+    when: cis_custom_remediation_ids | intersect(['5.3.2.1', '5.3.2.4']) | length > 0
+  - name: 5.3.3.3.3 | Configure use_authtok in managed PAM templates
+    become: true
+    when: '''5.3.3.3.3'' in cis_custom_remediation_ids'
+    block:
+    - name: 5.3.3.3.3 | Require valid managed baseline
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: 5.3.3.3.3 | Read current selection
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_history_selection
+      changed_when: false
+    - name: 5.3.3.3.3 | Require nonempty selection
+      ansible.builtin.assert:
+        that:
+        - cis_history_selection.stdout.split() | length > 0
+    - name: 5.3.3.3.3 | Inspect active profile templates
+      ansible.builtin.command:
+        argv:
+        - python3
+        - -c
+        - |-
+          import json,pathlib,re,sys
+          try:
+              profile=sys.argv[1]
+              if not re.fullmatch(r'(?:custom/)?[A-Za-z0-9_.-]+',profile):
+                  raise ValueError('Unsupported profile ID')
+              if profile.startswith('custom/'):
+                  directory=pathlib.Path('/etc/authselect')/profile
+              else:
+                  choices=[pathlib.Path('/usr/share/authselect/default')/profile,pathlib.Path('/usr/share/authselect/vendor')/profile]
+                  directory=next((p for p in choices if p.is_dir()),choices[0])
+              needs=False
+              for name in ('system-auth','password-auth'):
+                  lines=[line.split('#',1)[0].strip() for line in (directory/name).read_text().splitlines()]
+                  matches=[s for s in lines if re.match(r'^password\s+(?:required|requisite|sufficient)\s+pam_pwhistory[.]so(?=\s|$)',s)]
+                  if not matches: raise ValueError('Missing password pam_pwhistory entry in '+str(directory/name))
+                  needs=needs or any('use_authtok' not in line.split() for line in matches)
+              print(json.dumps({'needs_change':needs,'directory':str(directory)}))
+          except (OSError,ValueError) as error:
+              print(str(error),file=sys.stderr);sys.exit(2)
+        - '{{ cis_history_selection.stdout.split()[0] }}'
+      register: cis_history_inspection
+      changed_when: false
+    - name: 5.3.3.3.3 | Decode template inspection
+      ansible.builtin.set_fact:
+        cis_history_template_state: '{{ cis_history_inspection.stdout | from_json }}'
+    - name: 5.3.3.3.3 | Prepare isolated custom templates only when needed
+      when: cis_history_template_state.needs_change | bool
+      block:
+      - name: 5.3.3.3.3 | Choose a fresh profile name when starting from a vendor profile
+        ansible.builtin.set_fact:
+          cis_history_new_name: '{{ cis_authselect_custom_profile }}-pwhistory-{{ now(utc=true, fmt=''%Y%m%dT%H%M%S%fZ'')
+            }}'
+      - name: 5.3.3.3.3 | Validate custom profile name
+        ansible.builtin.assert:
+          that:
+          - cis_history_new_name is match('^[A-Za-z0-9_-]+$')
+      - name: 5.3.3.3.3 | Copy the active vendor profile without linking PAM templates
+        ansible.builtin.command:
+          argv:
+          - authselect
+          - create-profile
+          - '{{ cis_history_new_name }}'
+          - --base-on
+          - '{{ cis_history_selection.stdout.split()[0] }}'
+          - --symlink-meta
+        when: not cis_history_selection.stdout.split()[0].startswith('custom/')
+        changed_when: true
+      - name: 5.3.3.3.3 | Determine target profile
+        ansible.builtin.set_fact:
+          cis_history_target: '{{ cis_history_selection.stdout.split()[0] if cis_history_selection.stdout.split()[0].startswith(''custom/'')
+            else ''custom/'' ~ cis_history_new_name }}'
+      - name: 5.3.3.3.3 | Inspect target template file types
+        ansible.builtin.stat:
+          path: /etc/authselect/{{ cis_history_target }}/{{ item }}
+          follow: false
+        loop:
+        - system-auth
+        - password-auth
+        register: cis_history_template_files
+      - name: 5.3.3.3.3 | Require private regular template files
+        ansible.builtin.assert:
+          that:
+          - item.stat.exists | default(false)
+          - item.stat.isreg | default(false)
+          - not (item.stat.islnk | default(false))
+          fail_msg: Refusing to edit a missing or symlinked PAM template.
+        loop: '{{ cis_history_template_files.results }}'
+        loop_control:
+          label: '{{ item.item }}'
+      - name: 5.3.3.3.3 | Add use_authtok only to pwhistory password entries
+        ansible.builtin.replace:
+          path: /etc/authselect/{{ cis_history_target }}/{{ item }}
+          regexp: (?m)^([ \t]*password[ \t]+(?:requisite|required|sufficient)[ \t]+pam_pwhistory\.so)(?![^\r\n#]*\buse_authtok\b)([^\r\n]*)$
+          replace: \g<1> use_authtok\g<2>
+          backup: false
+        loop:
+        - system-auth
+        - password-auth
+        register: cis_history_template_changes
+      - name: 5.3.3.3.3 | Verify rendered changes before activation
+        ansible.builtin.command:
+          argv:
+          - python3
+          - -c
+          - |-
+            import os,pathlib,re,subprocess,sys
+            try:
+                args=['authselect','test',os.environ['CIS_PAM_TARGET']]+os.environ['CIS_PAM_FEATURES'].split()
+                result=subprocess.run(args,capture_output=True,text=True)
+                if result.returncode: raise ValueError(result.stderr.strip() or 'authselect test failed')
+                sections={};active=None
+                for line in result.stdout.splitlines():
+                    match=re.fullmatch(r'File (/[^:]+):',line.strip())
+                    if match:
+                        active=match.group(1);sections[active]=[]
+                    elif active is not None: sections[active].append(line)
+                required=['/etc/pam.d/system-auth','/etc/pam.d/password-auth','/etc/nsswitch.conf']
+                if any(p not in sections for p in required):
+                    raise ValueError('Cannot identify required authselect preview sections; no activation attempted')
+                paths=required+[p for p in sections if p.startswith('/etc/pam.d/') and p not in required]
+                def normal(lines):
+                    rows=[]
+                    for line in lines:
+                        words=line.split('#',1)[0].split()
+                        if not words: continue
+                        if len(words)>2 and words[0]=='password' and words[2]=='pam_pwhistory.so':
+                            words=[x for x in words if x!='use_authtok']
+                        rows.append(words)
+                    return rows
+                for filename in paths:
+                    if normal(pathlib.Path(filename).read_text().splitlines())!=normal(sections[filename]):
+                        raise ValueError('Unexpected changes beyond pwhistory use_authtok in '+filename)
+                print('Preview verified: only use_authtok changes permitted; PAM provider, stack order and NSS maps preserved')
+            except (OSError,ValueError) as error:
+                print(str(error),file=sys.stderr);sys.exit(2)
+        environment:
+          CIS_PAM_TARGET: '{{ cis_history_target }}'
+          CIS_PAM_FEATURES: '{{ cis_history_selection.stdout.split()[1:] | join('' '') }}'
+        changed_when: false
+      - name: 5.3.3.3.3 | Activate the derived profile with all existing features and backup
+        ansible.builtin.command:
+          argv: '{{ [''authselect'', ''select'', cis_history_target] + cis_history_selection.stdout.split()[1:]
+            }}'
+        when: cis_history_target != cis_history_selection.stdout.split()[0]
+        changed_when: true
+      - name: 5.3.3.3.3 | Regenerate files from the active custom profile with backup
+        ansible.builtin.command:
+          argv:
+          - authselect
+          - apply-changes
+        when: cis_history_target == cis_history_selection.stdout.split()[0]
+        changed_when: true
+    - name: 5.3.3.3.3 | Verify managed integrity after remediation
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: 5.3.3.3.3 | Verify use_authtok in both generated PAM files
+      ansible.builtin.shell: |
+        python3 - <<'CIS_PAM_AUDIT'
+        import pathlib,re,subprocess,sys
+        try:
+            integrity=subprocess.run(['authselect','check'],capture_output=True,text=True)
+            print(integrity.stdout.strip())
+            if integrity.returncode:
+                print(integrity.stderr.strip())
+                print('NON_COMPLIANT: invalid authselect configuration')
+                sys.exit(1)
+            requirements=[('password', 'required|requisite|sufficient', 'pam_pwhistory.so', 'use_authtok')]
+            failed=False
+            for filename in ('/etc/pam.d/system-auth','/etc/pam.d/password-auth'):
+                lines=[s.split('#',1)[0].strip() for s in pathlib.Path(filename).read_text().splitlines()]
+                for stack,controls,module,option in requirements:
+                    pattern=r'^'+stack+r'\s+(?:'+controls+r')\s+'+re.escape(module)+r'(?=\s|$)'
+                    matches=[line for line in lines if re.search(pattern,line)]
+                    good=bool(matches)
+                    if option:
+                        option_matches=[option in line.split() for line in matches]
+                        good=good and (any(option_matches) if module=='pam_faillock.so' else all(option_matches))
+                    print(f'{filename}: stack={stack} module={module} option={option or "none"} pass={good}')
+                    for line in matches: print('  '+line)
+                    failed=failed or not good
+            sys.exit(1 if failed else 0)
+        except (OSError,ValueError) as error:
+            print('VALIDATION_ERROR: '+str(error))
+            sys.exit(2)
+        CIS_PAM_AUDIT
+      args:
+        executable: /bin/bash
+      changed_when: false
+    - name: 5.3.3.3.3 | Read final selection
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_history_after
+      changed_when: false
+    - name: 5.3.3.3.3 | Verify all existing features and expected profile
+      ansible.builtin.assert:
+        that:
+        - cis_history_after.stdout.split() | length > 0
+        - cis_history_after.stdout.split()[0] == (cis_history_target if cis_history_template_state.needs_change
+          else cis_history_selection.stdout.split()[0])
+        - cis_history_selection.stdout.split()[1:] | difference(cis_history_after.stdout.split()[1:]) | length ==
+          0
+    - name: 5.3.3.3.3 | Verify SSH configuration syntax
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+      changed_when: false
+  - name: 5.3.3.4.1 | Manage nullok through authselect
+    become: true
+    when: '''5.3.3.4.1'' in cis_custom_remediation_ids'
+    block:
+    - name: 5.3.3.4.1 | Require valid authselect configuration
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: 5.3.3.4.1 | Read active profile and features
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_nullok_selection
+      changed_when: false
+    - name: 5.3.3.4.1 | Require an active profile
+      ansible.builtin.assert:
+        that:
+        - cis_nullok_selection.stdout.split() | length > 0
+        fail_msg: No active authselect profile was detected.
+    - name: 5.3.3.4.1 | Preserve the existing profile when already custom
+      ansible.builtin.set_fact:
+        cis_nullok_expected_profile: '{{ cis_nullok_selection.stdout.split()[0] }}'
+    - name: 5.3.3.4.1 | Create a custom profile from the active provider when required
+      when: not cis_nullok_selection.stdout.split()[0].startswith('custom/')
+      block:
+      - name: 5.3.3.4.1 | Choose a fresh custom profile name
+        ansible.builtin.set_fact:
+          cis_pam_copy_name: '{{ cis_authselect_custom_profile }}-{{ now(utc=true, fmt=''%Y%m%dT%H%M%S%fZ'') }}'
+      - name: 5.3.3.4.1 | Validate profile name
+        ansible.builtin.assert:
+          that:
+          - cis_pam_copy_name is match('^[A-Za-z0-9_-]+$')
+      - name: 5.3.3.4.1 | Copy the active provider without PAM symlinks
+        ansible.builtin.command:
+          argv:
+          - authselect
+          - create-profile
+          - '{{ cis_pam_copy_name }}'
+          - --base-on
+          - '{{ cis_nullok_selection.stdout.split()[0] }}'
+          - --symlink-meta
+        changed_when: true
+      - name: 5.3.3.4.1 | Set derived custom profile
+        ansible.builtin.set_fact:
+          cis_nullok_expected_profile: '{{ ''custom/'' ~ cis_pam_copy_name }}'
+      - name: 5.3.3.4.1 | Preview copied profile before selection
+        ansible.builtin.command:
+          argv:
+          - python3
+          - -c
+          - |-
+            import os,pathlib,re,subprocess,sys
+            try:
+                args=['authselect','test',os.environ['CIS_PAM_TARGET']]+os.environ['CIS_PAM_FEATURES'].split()
+                result=subprocess.run(args,capture_output=True,text=True)
+                if result.returncode: raise ValueError(result.stderr.strip() or 'authselect test failed')
+                sections={};active=None
+                for line in result.stdout.splitlines():
+                    match=re.fullmatch(r'File (/[^:]+):',line.strip())
+                    if match:
+                        active=match.group(1);sections[active]=[]
+                    elif active is not None: sections[active].append(line)
+                required=['/etc/pam.d/system-auth','/etc/pam.d/password-auth','/etc/nsswitch.conf']
+                if any(p not in sections for p in required):
+                    raise ValueError('Cannot identify required authselect preview sections; no activation attempted')
+                paths=required+[p for p in sections if p.startswith('/etc/pam.d/') and p not in required]
+                def normal(lines):
+                    rows=[]
+                    for line in lines:
+                        words=line.split('#',1)[0].split()
+                        if not words: continue
+                        if len(words)>2 and words[0]=='password' and words[2]=='pam_pwhistory.so':
+                            words=[x for x in words if x!='use_authtok']
+                        rows.append(words)
+                    return rows
+                for filename in paths:
+                    if normal(pathlib.Path(filename).read_text().splitlines())!=normal(sections[filename]):
+                        raise ValueError('Unexpected changes beyond pwhistory use_authtok in '+filename)
+                print('Preview verified: only use_authtok changes permitted; PAM provider, stack order and NSS maps preserved')
+            except (OSError,ValueError) as error:
+                print(str(error),file=sys.stderr);sys.exit(2)
+        environment:
+          CIS_PAM_TARGET: '{{ cis_nullok_expected_profile }}'
+          CIS_PAM_FEATURES: '{{ cis_nullok_selection.stdout.split()[1:] | join('' '') }}'
+        changed_when: false
+      - name: 5.3.3.4.1 | Select the custom profile with existing features and backup
+        ansible.builtin.command:
+          argv: '{{ [''authselect'', ''select'', cis_nullok_expected_profile] + cis_nullok_selection.stdout.split()[1:]
+            }}'
+        changed_when: true
+    - name: 5.3.3.4.1 | Inspect custom template file types
+      ansible.builtin.stat:
+        path: /etc/authselect/{{ cis_nullok_expected_profile }}/{{ item }}
+        follow: false
+      loop:
+      - system-auth
+      - password-auth
+      register: cis_nullok_template_files
+    - name: 5.3.3.4.1 | Require regular custom templates
+      ansible.builtin.assert:
+        that:
+        - item.stat.exists | default(false)
+        - item.stat.isreg | default(false)
+        - not (item.stat.islnk | default(false))
+      loop: '{{ cis_nullok_template_files.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+    - name: 5.3.3.4.1 | Read custom templates
+      ansible.builtin.slurp:
+        src: /etc/authselect/{{ cis_nullok_expected_profile }}/{{ item }}
+      loop:
+      - system-auth
+      - password-auth
+      register: cis_nullok_templates
+    - name: 5.3.3.4.1 | Detect the conditional without-nullok template option
+      ansible.builtin.set_fact:
+        cis_nullok_conditional: |-
+          {{ '{if not "without-nullok":nullok}' in (cis_nullok_templates.results | map(attribute='content') | map('b64decode') | join('
+          ')) }}
+    - name: 5.3.3.4.1 | Remove literal nullok from custom PAM templates
+      ansible.builtin.replace:
+        path: /etc/authselect/{{ cis_nullok_expected_profile }}/{{ item }}
+        regexp: (?m)^([ \t]*(?:auth|account|password|session)[ \t]+(?:requisite|required|sufficient)[ \t]+pam_unix\.so[^\n\r#]*?)[
+          \t]+nullok\b
+        replace: \g<1>
+        backup: false
+      loop:
+      - system-auth
+      - password-auth
+    - name: 5.3.3.4.1 | Enable without-nullok for conditional templates
+      when: cis_nullok_conditional | bool
+      block:
+      - name: 5.3.3.4.1 | Read supported profile features
+        ansible.builtin.command:
+          argv:
+          - authselect
+          - list-features
+          - '{{ cis_nullok_expected_profile }}'
+        register: cis_nullok_supported_features
+        changed_when: false
+      - name: 5.3.3.4.1 | Require the conditional feature to be supported
+        ansible.builtin.assert:
+          that:
+          - '''without-nullok'' in cis_nullok_supported_features.stdout.split()'
+      - name: 5.3.3.4.1 | Enable the conditional feature with backup
+        ansible.builtin.command:
+          argv:
+          - authselect
+          - enable-feature
+          - without-nullok
+        when: '''without-nullok'' not in cis_nullok_selection.stdout.split()[1:]'
+        changed_when: true
+    - name: 5.3.3.4.1 | Apply template changes through authselect
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - apply-changes
+      changed_when: false
+    - name: 5.3.3.4.1 | Verify authselect integrity after remediation
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - check
+      changed_when: false
+    - name: 5.3.3.4.1 | Read resulting profile and features
+      ansible.builtin.command:
+        argv:
+        - authselect
+        - current
+        - --raw
+      register: cis_nullok_selection_after
+      changed_when: false
+    - name: 5.3.3.4.1 | Verify profile and existing features were preserved
+      ansible.builtin.assert:
+        that:
+        - cis_nullok_selection_after.stdout.split()[0] == cis_nullok_expected_profile
+        - |-
+          cis_nullok_selection.stdout.split()[1:] | difference(
+              cis_nullok_selection_after.stdout.split()[1:]
+            )
+          | length == 0
+        - not (cis_nullok_conditional | bool) or 'without-nullok' in cis_nullok_selection_after.stdout.split()[1:]
+        fail_msg: Profile or feature preservation verification failed.
+    - name: 5.3.3.4.1 | Check generated PAM files for active nullok
+      ansible.builtin.command:
+        argv:
+        - /usr/bin/grep
+        - -Pn
+        - ^[ \t]*[^# \t][^#\r\n]*pam_unix\.so[^#\r\n]*\bnullok\b
+        - /etc/pam.d/system-auth
+        - /etc/pam.d/password-auth
+      register: cis_nullok_remaining
+      changed_when: false
+      failed_when: cis_nullok_remaining.rc not in [0, 1]
+    - name: 5.3.3.4.1 | Require nullok to be absent
+      ansible.builtin.assert:
+        that:
+        - cis_nullok_remaining.rc == 1
+        fail_msg: 'nullok remains in the generated PAM files: {{ cis_nullok_remaining.stdout }}'
+        success_msg: Generated PAM files contain no active nullok; existing features are preserved.
+  - name: 5.4.1.3 | Configure password expiration warning days
+    become: true
+    when: '''5.4.1.3'' in cis_custom_remediation_ids'
+    block:
+    - name: 5.4.1.3 | Validate configured warning period
+      ansible.builtin.assert:
+        that:
+        - cis_password_warn_days | string is match('^[0-9]+$')
+        - cis_password_warn_days | int >= 7
+        fail_msg: Configure cis_password_warn_days as an integer of at least 7 in config/cis_unix_team_inputs.yml.
+    - name: 5.4.1.3 | Read current default warning period
+      ansible.builtin.command:
+        argv:
+        - /usr/bin/awk
+        - $1 == "PASS_WARN_AGE" {value=$2} END {print value}
+        - /etc/login.defs
+      register: cis_password_warn_default
+      changed_when: false
+    - name: 5.4.1.3 | Configure default warning period
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: ^[ \t]*PASS_WARN_AGE[ \t]+
+        line: PASS_WARN_AGE {{ cis_password_warn_days | int }}
+        owner: root
+        group: root
+        backup: false
+      when: |-
+        not (
+          cis_password_warn_default.stdout | trim
+          is match('^[0-9]+$')
+        ) or (cis_password_warn_default.stdout | trim | int) < (cis_password_warn_days | int)
+    - name: 5.4.1.3 | Identify existing users needing remediation
+      ansible.builtin.command:
+        argv:
+        - /usr/bin/awk
+        - -F: null
+        - -v
+        - minimum={{ cis_password_warn_days | int }}
+        - |
+          $2 ~ /^\$.+\$/ {
+            if ($6 == "" || $6 + 0 < minimum)
+              print $1
+          }
+        - /etc/shadow
+      register: cis_password_warning_users
+      changed_when: false
+    - name: 5.4.1.3 | Update warning period for non-compliant users
+      ansible.builtin.command:
+        argv:
+        - /usr/bin/chage
+        - --warndays
+        - '{{ cis_password_warn_days | int | string }}'
+        - '{{ item }}'
+      loop: '{{ cis_password_warning_users.stdout_lines }}'
+      loop_control:
+        label: '{{ item }}'
+      changed_when: true
+  - name: 6.1.2 | Configure scheduled AIDE integrity check
+    when: '''6.1.2'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 6.1.2 | Ensure AIDE is installed
+      ansible.builtin.dnf:
+        name: aide
+        state: present
+    - name: 6.1.2 | Validate daily AIDE schedule
+      ansible.builtin.assert:
+        that:
+        - cis_aide_cron_hour | string is match('^[0-9]{1,2}$')
+        - cis_aide_cron_minute | string is match('^[0-9]{1,2}$')
+        - cis_aide_cron_hour | int >= 0
+        - cis_aide_cron_hour | int <= 23
+        - cis_aide_cron_minute | int >= 0
+        - cis_aide_cron_minute | int <= 59
+        fail_msg: AIDE timer requires a numeric hour 0-23 and minute 0-59.
+    - name: 6.1.2 | Configure AIDE check service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/aidecheck.service
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+        content: |
+          [Unit]
+          Description=AIDE filesystem integrity check
+
+          [Service]
+          Type=oneshot
+          User=root
+          ExecStart=/usr/sbin/aide --check
+          TimeoutStartSec=0
+
+          [Install]
+          WantedBy=multi-user.target
+      register: cis_aide_service_change
+    - name: 6.1.2 | Configure daily AIDE check timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/aidecheck.timer
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+        content: |
+          [Unit]
+          Description=Daily AIDE filesystem integrity check
+
+          [Timer]
+          OnCalendar=*-*-* {{ '%02d' | format(cis_aide_cron_hour | int) }}:{{ '%02d' | format(cis_aide_cron_minute | int) }}:00
+          Persistent=true
+          Unit=aidecheck.service
+
+          [Install]
+          WantedBy=timers.target
+      register: cis_aide_timer_change
+    - name: 6.1.2 | Validate AIDE systemd units
+      ansible.builtin.command:
+        argv:
+        - systemd-analyze
+        - verify
+        - /etc/systemd/system/aidecheck.service
+        - /etc/systemd/system/aidecheck.timer
+      changed_when: false
+    - name: 6.1.2 | Reload systemd after unit changes
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      when: cis_aide_service_change.changed or cis_aide_timer_change.changed
+    - name: 6.1.2 | Enable AIDE service as required by the audit
+      ansible.builtin.systemd_service:
+        name: aidecheck.service
+        masked: false
+        enabled: true
+    - name: 6.1.2 | Enable and activate AIDE timer
+      ansible.builtin.systemd_service:
+        name: aidecheck.timer
+        masked: false
+        enabled: true
+        state: '{{ ''restarted'' if (cis_aide_service_change.changed or cis_aide_timer_change.changed) else ''started''
+          }}'
+    - name: 6.1.2 | Discover system cron files
+      ansible.builtin.find:
+        paths: /etc/cron.d
+        file_type: file
+        recurse: false
+      register: cis_aide_system_cron_files
+    - name: 6.1.2 | Inspect root and system crontabs
+      ansible.builtin.stat:
+        path: '{{ item }}'
+      loop:
+      - /var/spool/cron/root
+      - /etc/crontab
+      register: cis_aide_other_cron_files
+    - name: 6.1.2 | Retire duplicate direct AIDE cron checks
+      ansible.builtin.replace:
+        path: '{{ item }}'
+        regexp: (?m)^[ \t]*(?:(?:[^# \t\r\n]+[ \t]+){5}|@(?:daily|hourly|weekly|monthly|yearly|annually|reboot)[
+          \t]+)(?:root[ \t]+)?/usr/sbin/aide[ \t]+--check[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)
+        replace: ''
+        backup: false
+      loop: |-
+        {{
+          (cis_aide_system_cron_files.files | map(attribute='path') | list)
+          +
+          (cis_aide_other_cron_files.results
+           | selectattr('stat.exists', 'equalto', true)
+           | map(attribute='item') | list)
+        }}
+  - name: 7.1.11 | Secure world-writable files and directories
+    when: '''7.1.11'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 7.1.11 | Read local filesystem mount points
+      ansible.builtin.command:
+        argv:
+        - findmnt
+        - -rn
+        - -t
+        - ext2,ext3,ext4,xfs,btrfs
+        - -o
+        - TARGET
+      register: cis_local_filesystem_mounts
+      changed_when: false
+    - name: 7.1.11 | Find world-writable files
+      ansible.builtin.command:
+        argv:
+        - find
+        - '{{ item }}'
+        - -xdev
+        - -type
+        - f
+        - -perm
+        - '-0002'
+        - -print
+      loop: '{{ cis_local_filesystem_mounts.stdout_lines }}'
+      register: cis_world_writable_file_search
+      changed_when: false
+      failed_when: false
+    - name: 7.1.11 | Remove other-write permission from files
+      ansible.builtin.file:
+        path: '{{ item }}'
+        mode: o-w
+      loop: |-
+        {{
+          cis_world_writable_file_search.results
+          | map(attribute='stdout_lines')
+          | flatten
+          | unique
+          | list
+        }}
+      loop_control:
+        label: '{{ item }}'
+    - name: 7.1.11 | Find world-writable directories without sticky bit
+      ansible.builtin.command:
+        argv:
+        - find
+        - '{{ item }}'
+        - -xdev
+        - -type
+        - d
+        - -perm
+        - '-0002'
+        - '!'
+        - -perm
+        - '-1000'
+        - -print
+      loop: '{{ cis_local_filesystem_mounts.stdout_lines }}'
+      register: cis_world_writable_directory_search
+      changed_when: false
+      failed_when: false
+    - name: 7.1.11 | Add sticky bit to world-writable directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        mode: a+t
+      loop: |-
+        {{
+          cis_world_writable_directory_search.results
+          | map(attribute='stdout_lines')
+          | flatten
+          | unique
+          | list
+        }}
+      loop_control:
+        label: '{{ item }}'
+  - name: 7.1.12 | Apply configured ownership to unowned paths
+    when:
+    - '''7.1.12'' in cis_custom_remediation_ids'
+    - cis_unowned_path_ownership | default([]) | length > 0
+    become: true
+    block:
+    - name: 7.1.12 | Check configured unowned paths
+      ansible.builtin.stat:
+        path: '{{ item.path }}'
+        follow: false
+      loop: '{{ cis_unowned_path_ownership }}'
+      loop_control:
+        label: '{{ item.path }}'
+      register: cis_unowned_path_status
+    - name: 7.1.12 | Correct configured path ownership
+      ansible.builtin.file:
+        path: '{{ item.item.path }}'
+        owner: '{{ item.item.owner }}'
+        group: '{{ item.item.group }}'
+        recurse: '{{ item.item.recurse | default(false) }}'
+        follow: false
+      loop: '{{ cis_unowned_path_status.results }}'
+      loop_control:
+        label: '{{ item.item.path }}'
+      when: item.stat.exists | default(false)
+  - name: 7.2.3 | Restore missing groups using the sole local username
+    become: true
+    when: '''7.2.3'' in (cis_custom_remediation_ids | default([]))'
+    block:
+    - name: 7.2.3 | Identify missing GIDs and local/NSS conflicts
+      ansible.builtin.command:
+        argv:
+        - python3
+        - -c
+        - |-
+          import collections,json,os,pathlib,re,subprocess,sys
+          try:
+              groups={};local_names={}
+              for number,line in enumerate(pathlib.Path('/etc/group').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=4 or not fields[2].isdigit():
+                      raise ValueError('Malformed /etc/group entry at line '+str(number))
+                  gid=int(fields[2]);groups.setdefault(gid,[]).append(fields[0]);local_names[fields[0]]=gid
+              if not groups:raise ValueError('/etc/group contains no usable entries')
+              missing=collections.defaultdict(list);seen=set()
+              for number,line in enumerate(pathlib.Path('/etc/passwd').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=7 or not fields[2].isdigit() or not fields[3].isdigit():
+                      raise ValueError('Malformed /etc/passwd entry at line '+str(number))
+                  if fields[0] in seen:raise ValueError('Duplicate local username: '+fields[0])
+                  seen.add(fields[0]);gid=int(fields[3])
+                  if gid not in groups:missing[gid].append({'name':fields[0],'uid':int(fields[2]),'gid':gid})
+              candidates=[];review=[]
+              def resolves(key):
+                  result=subprocess.run(['getent','group',str(key)],capture_output=True,text=True,
+                                        timeout=20,env=dict(os.environ,LC_ALL='C'))
+                  if result.returncode==0:
+                      if not result.stdout.strip():raise ValueError('Empty successful NSS lookup for '+str(key))
+                      return result.stdout.strip()
+                  if result.returncode==2 and not result.stdout.strip() and not result.stderr.strip():return None
+                  raise ValueError('Cannot safely query NSS for '+str(key)+': '+result.stderr.strip())
+              for gid,users in sorted(missing.items()):
+                  reason=None;name=users[0]['name']
+                  if gid==0 or gid>4294967294:reason='Privileged or unsupported missing GID requires manual repair'
+                  elif len(users)!=1:reason='Missing GID is shared by multiple local users; no unique username can be selected'
+                  elif not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]*[$]?',name):reason='Username is not suitable for automatic local group naming'
+                  else:
+                      resolved_gid=resolves(gid)
+                      if resolved_gid is not None:reason='GID already resolves through NSS; do not duplicate a directory group'
+                      elif name in local_names or resolves(name) is not None:
+                          name='cis_gid_'+str(gid)
+                          if name in local_names or resolves(name) is not None:
+                              reason='Fallback group name '+name+' already exists locally or through NSS; do not modify it'
+                  if reason:review.append({'gid':gid,'users':[u['name'] for u in users],'reason':reason})
+                  else:candidates.append({'name':name,'gid':gid})
+              print(json.dumps({'candidates':candidates,'review_required':review,
+                                'invalid_users':[u for users in missing.values() for u in users]}))
+          except (OSError,ValueError,subprocess.TimeoutExpired) as error:
+              print('Cannot build group remediation plan: '+str(error),file=sys.stderr)
+              sys.exit(2)
+      register: cis_gid_plan_result
+      changed_when: false
+      check_mode: false
+    - name: 7.2.3 | Decode automatic group restoration plan
+      ansible.builtin.set_fact:
+        cis_gid_plan: '{{ cis_gid_plan_result.stdout | from_json }}'
+    - name: 7.2.3 | Report planned changes and unresolved cases
+      ansible.builtin.debug:
+        msg:
+          create_groups: '{{ cis_gid_plan.candidates }}'
+          manual_review_required: '{{ cis_gid_plan.review_required }}'
+          check_mode: '{{ ansible_check_mode }}'
+    - name: 7.2.3 | Initialize file-writing command plan
+      ansible.builtin.set_fact:
+        cis_gid_create_commands: []
+    - name: 7.2.3 | Plan native group creation commands
+      ansible.builtin.set_fact:
+        cis_gid_create_commands: |-
+          {{ cis_gid_create_commands + [[
+              '/usr/sbin/groupadd', '--gid', item.gid | string, '--', item.name
+          ]] }}
+      loop: '{{ cis_gid_plan.candidates }}'
+      loop_control:
+        label: '{{ item.name }}:{{ item.gid }}'
+    - name: 7.2.3 | Create groups with verified changed-file backups
+      cis_command_with_backup:
+        commands: '{{ cis_gid_create_commands }}'
+        paths:
+        - /etc/group
+        - /etc/gshadow
+        backup_location: adjacent
+      when:
+      - cis_gid_create_commands | length > 0
+      - not ansible_check_mode
+    - name: 7.2.3 | Recheck all local primary group references
+      ansible.builtin.command:
+        argv:
+        - python3
+        - -c
+        - |-
+          import json,pathlib,sys
+          try:
+              gids=set()
+              for number,line in enumerate(pathlib.Path('/etc/group').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=4 or not fields[2].isdigit():raise ValueError('Malformed group entry at line '+str(number))
+                  gids.add(int(fields[2]))
+              if not gids:raise ValueError('/etc/group contains no usable entries')
+              invalid=[]
+              for number,line in enumerate(pathlib.Path('/etc/passwd').read_text().splitlines(),1):
+                  if not line.strip() or line.lstrip().startswith('#'):continue
+                  fields=line.split(':')
+                  if len(fields)!=7 or not fields[3].isdigit():raise ValueError('Malformed passwd entry at line '+str(number))
+                  if int(fields[3]) not in gids:invalid.append({'name':fields[0],'gid':int(fields[3])})
+              print(json.dumps(invalid))
+          except (OSError,ValueError) as error:
+              print('Cannot validate local primary groups: '+str(error),file=sys.stderr);sys.exit(2)
+      register: cis_gid_post_result
+      changed_when: false
+      check_mode: false
+    - name: 7.2.3 | Report remaining invalid primary GIDs
+      ansible.builtin.debug:
+        msg:
+          invalid_users: '{{ cis_gid_post_result.stdout | from_json }}'
+          manual_review_required: '{{ cis_gid_plan.review_required }}'
+    - name: 7.2.3 | Require every local primary GID to exist after remediation
+      ansible.builtin.assert:
+        that:
+        - cis_gid_post_result.stdout | from_json | length == 0
+        fail_msg: 'Unresolved primary GIDs: {{ cis_gid_post_result.stdout }}. Review reasons: {{ cis_gid_plan.review_required
+          }}. Safe candidates may have been created; unresolved accounts were not modified.'
+        success_msg: All local passwd primary GIDs exist in /etc/group.
+      when: not ansible_check_mode
+  - name: 1.2.1.1 | Import approved package-signing keys
+    become: true
+    ansible.builtin.rpm_key:
+      key: '{{ item }}'
+      state: present
+    loop: '{{ cis_approved_gpg_key_files | default([]) }}'
+    loop_control:
+      label: '{{ item }}'
+    when:
+    - '''1.2.1.1'' in cis_custom_remediation_ids'
+    - cis_gpg_key_policy_configured | default(false) | bool
+    - cis_approved_gpg_key_files | default([]) | length > 0
+  - name: 1.2.1.4 | Configure explicitly supplied repositories
+    become: true
+    ansible.builtin.yum_repository:
+      name: '{{ item.id }}'
+      description: '{{ item.description | default(item.id) }}'
+      baseurl: '{{ item.baseurl | default(omit) }}'
+      mirrorlist: '{{ item.mirrorlist | default(omit) }}'
+      metalink: '{{ item.metalink | default(omit) }}'
+      enabled: '{{ item.enabled | default(true) }}'
+      gpgcheck: '{{ item.gpgcheck | default(true) }}'
+      gpgkey: '{{ item.gpgkey | default(omit) }}'
+      state: present
+    loop: '{{ cis_repository_definitions | default([]) }}'
+    loop_control:
+      label: '{{ item.id }}'
+    when:
+    - '''1.2.1.4'' in cis_custom_remediation_ids'
+    - cis_repository_policy_configured | default(false) | bool
+    - cis_repository_definitions | default([]) | length > 0
+  - name: 2.1.22 | Validate listener remediation configuration
+    ansible.builtin.assert:
+      that:
+      - item.unit | default('') | length > 0
+      - item.action | default('') in ['stop', 'mask', 'remove']
+      - item.action != 'remove' or item.package | default('') | length > 0
+      fail_msg: Listener remediation requires unit and action=stop|mask|remove. The remove action also requires
+        package.
+    loop: '{{ cis_listener_remediation_actions | default([]) }}'
+    loop_control:
+      label: '{{ item.unit | default(''invalid entry'') }}'
+    when: '''2.1.22'' in cis_custom_remediation_ids'
+  - name: 2.1.22 | Stop explicitly unapproved listener units
+    become: true
+    ansible.builtin.systemd_service:
+      name: '{{ item.unit }}'
+      state: stopped
+      enabled: false
+    loop: '{{ cis_listener_remediation_actions | default([]) }}'
+    loop_control:
+      label: '{{ item.unit }}'
+    when:
+    - '''2.1.22'' in cis_custom_remediation_ids'
+    - item.action in ['stop', 'mask', 'remove']
+  - name: 2.1.22 | Mask explicitly unapproved listener units
+    become: true
+    ansible.builtin.systemd_service:
+      name: '{{ item.unit }}'
+      masked: true
+    loop: '{{ cis_listener_remediation_actions | default([]) }}'
+    loop_control:
+      label: '{{ item.unit }}'
+    when:
+    - '''2.1.22'' in cis_custom_remediation_ids'
+    - item.action == 'mask'
+  - name: 2.1.22 | Remove explicitly unapproved service packages
+    become: true
+    ansible.builtin.dnf:
+      name: '{{ item.package }}'
+      state: absent
+    loop: '{{ cis_listener_remediation_actions | default([]) }}'
+    loop_control:
+      label: '{{ item.package | default(item.unit) }}'
+    when:
+    - '''2.1.22'' in cis_custom_remediation_ids'
+    - item.action == 'remove'
+    - item.package | default('') | length > 0
+  - name: 6.2.1.2 | Configure tmpfiles journal file permissions
+    become: true
+    when: '''6.2.1.2'' in cis_custom_remediation_ids'
+    block:
+    - name: Confirm journal permission input
+      ansible.builtin.assert:
+        that:
+        - cis_journal_file_policy_configured | bool
+        - cis_journal_file_mode is match('^0[0-7]{3}$')
+        - cis_journal_file_mode == '0640'
+    - name: Copy vendor tmpfiles configuration if no override exists
+      ansible.builtin.copy:
+        src: /usr/lib/tmpfiles.d/systemd.conf
+        dest: /etc/tmpfiles.d/systemd.conf
+        remote_src: true
+        force: false
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Update explicit journal-file permission rules
+      ansible.builtin.replace:
+        path: /etc/tmpfiles.d/systemd.conf
+        regexp: ^([ \t]*z[ \t]+/(?:var|run)/log/journal/\S*\.journal\S*[ \t]+)\S+
+        replace: \g<1>{{ cis_journal_file_mode }}
+        backup: false
+    - name: Add journal-file rules without changing directory permissions
+      ansible.builtin.blockinfile:
+        path: /etc/tmpfiles.d/systemd.conf
+        marker: '# {mark} CIS JOURNAL FILE PERMISSIONS'
+        backup: false
+        block: |
+          z /var/log/journal/*/*.journal* {{ cis_journal_file_mode }} - - - -
+          z /run/log/journal/*/*.journal* {{ cis_journal_file_mode }} - - - -
+    - name: Discover persistent and runtime journal files
+      ansible.builtin.find:
+        paths:
+        - /var/log/journal
+        - /run/log/journal
+        recurse: true
+        file_type: file
+        patterns:
+        - '*.journal'
+        - '*.journal~'
+      register: cis_three_journal_files
+    - name: Set existing journal-file modes from config
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        mode: '{{ cis_journal_file_mode }}'
+      loop: '{{ cis_three_journal_files.files }}'
+      loop_control:
+        label: '{{ item.path }}'
+  - name: 6.2.1.3 | Append configured limits under the existing Journal section
+    become: true
+    when: '''6.2.1.3'' in cis_custom_remediation_ids'
+    block:
+    - name: Confirm rotation policy is configured
+      ansible.builtin.assert:
+        that:
+        - cis_journald_rotation_policy_configured | bool
+    - name: Read main journald configuration
+      ansible.builtin.slurp:
+        src: /etc/systemd/journald.conf
+      register: cis_three_journald_before
+    - name: Confirm the existing final section is Journal
+      ansible.builtin.assert:
+        that:
+        - |-
+          ((cis_three_journald_before.content | b64decode)
+           | regex_findall('(?m)^\s*\[([^\]\r\n]+)\][ \t]*$')
+           | last | default('')) == 'Journal'
+        fail_msg: The last section in /etc/systemd/journald.conf is not [Journal]. Appending settings at EOF would
+          put them in the wrong section.
+    - name: Append policy values at EOF without another section header
+      ansible.builtin.blockinfile:
+        path: /etc/systemd/journald.conf
+        marker: '# {mark} CIS JOURNAL ROTATION'
+        insertafter: EOF
+        backup: false
+        block: |
+          SystemMaxUse={{ cis_journald_system_max_use }}
+          SystemKeepFree={{ cis_journald_system_keep_free }}
+          RuntimeMaxUse={{ cis_journald_runtime_max_use }}
+          RuntimeKeepFree={{ cis_journald_runtime_keep_free }}
+          MaxFileSec={{ cis_journald_max_file_sec }}
+      register: cis_three_rotation_change
+    - name: Restart journald only after a configuration change
+      ansible.builtin.systemd_service:
+        name: systemd-journald.service
+        state: restarted
+      when: cis_three_rotation_change.changed
+  - name: 6.2.2.1.2 | Check journal-upload unit availability
+    become: true
+    ansible.builtin.command:
+      argv:
+      - systemctl
+      - show
+      - systemd-journal-upload.service
+      - --property=LoadState
+      - --value
+    register: cis_journal_upload_unit
+    changed_when: false
+    failed_when: false
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - not cis_journal_upload_enabled | bool
+  - name: 6.2.2.1.2 | Disable journal-upload when prohibited by policy
+    become: true
+    ansible.builtin.systemd_service:
+      name: systemd-journal-upload.service
+      state: stopped
+      enabled: false
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - not cis_journal_upload_enabled | bool
+    - cis_journal_upload_unit.stdout | default('not-found') != 'not-found'
+  - name: 6.2.2.1.2 | Check journal-upload authentication files
+    become: true
+    ansible.builtin.stat:
+      path: '{{ item }}'
+    loop:
+    - '{{ cis_journal_upload_server_key_file }}'
+    - '{{ cis_journal_upload_server_certificate_file }}'
+    - '{{ cis_journal_upload_trusted_certificate_file }}'
+    register: cis_journal_upload_auth_files
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - cis_journal_upload_enabled | bool
+  - name: 6.2.2.1.2 | Create journal-upload drop-in directory
+    become: true
+    ansible.builtin.file:
+      path: /etc/systemd/journal-upload.conf.d
+      state: directory
+      owner: root
+      group: root
+      mode: '0755'
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - cis_journal_upload_enabled | bool
+    - cis_journal_upload_auth_files.results | map(attribute='stat.exists') | select('equalto', false) | list | length
+      == 0
+  - name: 6.2.2.1.2 | Configure journal-upload authentication
+    become: true
+    ansible.builtin.copy:
+      dest: /etc/systemd/journal-upload.conf.d/60-cis-auth.conf
+      owner: root
+      group: root
+      mode: '0600'
+      content: |
+        [Upload]
+        URL={{ cis_journal_upload_url }}
+        ServerKeyFile={{ cis_journal_upload_server_key_file }}
+        ServerCertificateFile={{ cis_journal_upload_server_certificate_file }}
+        TrustedCertificateFile={{ cis_journal_upload_trusted_certificate_file }}
+    register: cis_journal_upload_configuration
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - cis_journal_upload_enabled | bool
+    - cis_journal_upload_auth_files.results | map(attribute='stat.exists') | select('equalto', false) | list | length
+      == 0
+  - name: 6.2.2.1.2 | Restart journal-upload after configuration change
+    become: true
+    ansible.builtin.systemd_service:
+      name: systemd-journal-upload.service
+      state: restarted
+    when:
+    - '''6.2.2.1.2'' in cis_custom_remediation_ids'
+    - cis_journal_upload_configuration is defined
+    - cis_journal_upload_configuration.changed | default(false)
+  - name: 6.2.3.8 | Configure automatic rsyslog rotation
+    become: true
+    when: '''6.2.3.8'' in cis_custom_remediation_ids'
+    block:
+    - name: Ensure logrotate is installed
+      ansible.builtin.dnf:
+        name: logrotate
+        state: present
+    - name: Configure rotation for existing standard rsyslog destinations
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/rsyslog
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+        content: |
+          /var/log/cron
+          /var/log/maillog
+          /var/log/messages
+          /var/log/secure
+          /var/log/spooler
+          {
+              {{ cis_rsyslog_rotation_frequency }}
+              rotate {{ cis_rsyslog_rotation_count }}
+              missingok
+              notifempty
+              compress
+              delaycompress
+              create 0640 root root
+              sharedscripts
+              postrotate
+                  /usr/bin/systemctl -s HUP kill rsyslog.service >/dev/null 2>&1 || true
+              endscript
+          }
+    - name: Validate complete logrotate configuration without rotating
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/logrotate
+        - --debug
+        - /etc/logrotate.conf
+      changed_when: false
+    - name: Enable automatic rotation
+      ansible.builtin.systemd_service:
+        name: logrotate.timer
+        enabled: true
+        state: started
+  - name: 2.4.1.8 | Ensure cron.allow exists with compliant access
+    ansible.builtin.file:
+      path: /etc/cron.allow
+      state: touch
+      owner: root
+      group: root
+      mode: '0600'
+      access_time: preserve
+      modification_time: preserve
+    when: '''2.4.1.8'' in cis_custom_remediation_ids'
+  - name: 2.4.1.8 | Check whether cron.deny exists
+    ansible.builtin.stat:
+      path: /etc/cron.deny
+    register: cis_cron_deny
+    when: '''2.4.1.8'' in cis_custom_remediation_ids'
+  - name: 2.4.1.8 | Configure cron.deny access when present
+    ansible.builtin.file:
+      path: /etc/cron.deny
+      owner: root
+      group: root
+      mode: '0600'
+    when:
+    - '''2.4.1.8'' in cis_custom_remediation_ids'
+    - cis_cron_deny.stat.exists | default(false)
+  - name: 1.1.1.9 | Prevent unused filesystem modules from loading
+    ansible.builtin.lineinfile:
+      path: /etc/modprobe.d/cis-unused-filesystems.conf
+      regexp: '^install {{ item | regex_escape }} '
+      line: install {{ item }} /bin/false
+      create: true
+      owner: root
+      group: root
+      mode: '0600'
+    loop: '{{ cis_unused_filesystem_modules }}'
+    when:
+    - '''1.1.1.9'' in cis_custom_remediation_ids'
+    - item not in cis_required_filesystems
+  - name: 1.1.1.9 | Blacklist unused filesystem modules
+    ansible.builtin.lineinfile:
+      path: /etc/modprobe.d/cis-unused-filesystems.conf
+      regexp: ^blacklist {{ item | regex_escape }}$
+      line: blacklist {{ item }}
+      create: true
+      owner: root
+      group: root
+      mode: '0600'
+    loop: '{{ cis_unused_filesystem_modules }}'
+    when:
+    - '''1.1.1.9'' in cis_custom_remediation_ids'
+    - item not in cis_required_filesystems
+  - name: 1.1.1.9 | Unload unused filesystem modules
+    community.general.modprobe:
+      name: '{{ item }}'
+      state: absent
+    loop: '{{ cis_unused_filesystem_modules }}'
+    when:
+    - '''1.1.1.9'' in cis_custom_remediation_ids'
+    - item not in cis_required_filesystems
+  - name: 1.3.1.2 | Check for SELinux-disabling kernel arguments
+    ansible.builtin.shell: |
+      set -o pipefail
+      grubby --info=ALL |
+        grep -Po '(selinux|enforcing)=0' || true
+    args:
+      executable: /bin/bash
+    register: cis_selinux_disabled_kernel_arguments
+    changed_when: false
+    when: '''1.3.1.2'' in cis_custom_remediation_ids'
+  - name: 1.3.1.2 | Remove SELinux-disabling arguments from all kernels
+    ansible.builtin.command:
+      argv:
+      - grubby
+      - --update-kernel=ALL
+      - --remove-args=selinux=0 enforcing=0
+    when:
+    - '''1.3.1.2'' in cis_custom_remediation_ids'
+    - cis_selinux_disabled_kernel_arguments.stdout | trim | length > 0
+    changed_when: true
+  - name: 1.3.1.2 | Remove SELinux-disabling arguments from GRUB defaults
+    ansible.builtin.replace:
+      path: /etc/default/grub
+      regexp: (^|\s+)(selinux|enforcing)=0(?=\s|$)
+      replace: \1
+    when: '''1.3.1.2'' in cis_custom_remediation_ids'
+  - name: 3.1.1 | Enable IPv6 in configured boot entries
+    become: true
+    when: '''3.1.1'' in cis_custom_remediation_ids'
+    block:
+    - name: 3.1.1 | Confirm selected IPv6 policy
+      ansible.builtin.assert:
+        that:
+        - cis_ipv6_policy == 'enabled'
+        fail_msg: This remediation requires cis_ipv6_policy=enabled.
+    - name: 3.1.1 | Read configured boot entries
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/grubby
+        - --info=ALL
+      register: cis_ipv6_boot_entries
+      changed_when: false
+    - name: 3.1.1 | Remove IPv6 disable argument from all boot entries
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/grubby
+        - --update-kernel=ALL
+        - --remove-args=ipv6.disable=1
+      when: cis_ipv6_boot_entries.stdout is search('(?m)^args=.*\bipv6\.disable=1\b')
+    - name: 3.1.1 | Read current IPv6 module status
+      ansible.builtin.slurp:
+        src: /sys/module/ipv6/parameters/disable
+      register: cis_ipv6_runtime_status
+    - name: 3.1.1 | Report reboot requirement
+      ansible.builtin.debug:
+        msg: |-
+          {{
+            'IPv6 is enabled. No reboot is required for this control.'
+            if (cis_ipv6_runtime_status.content | b64decode | trim) == '0'
+            else
+            'Boot configuration updated. Reboot the server, then rerun validation to confirm IPv6 is enabled.'
+          }}
+  - name: Install libpwquality for control 5.3.1.3
+    ansible.builtin.dnf:
+      name: libpwquality
+      state: latest
+    when: '''5.3.1.3'' in cis_custom_remediation_ids'
+  - name: Remediate nftables controls using approved inputs
+    when:
+    - cis_firewall_backend == 'nftables'
+    - cis_custom_remediation_ids | intersect(['4.1.1', '4.3.1', '4.3.2', '4.3.3']) | length > 0
+    block:
+    - name: Require complete approved management inputs before firewall changes
+      ansible.builtin.assert:
+        that:
+        - cis_nftables_policy_configured | default(false) | bool
+        - (cis_nftables_management_sources | default([]) | length > 0) or (cis_nftables_management_ipv6_sources
+          | default([]) | length > 0)
+        - cis_nftables_management_tcp_ports | default([]) | length > 0
+        - (ansible_port | default(22) | int) in (cis_nftables_management_tcp_ports | map('int') | list)
+        fail_msg: Approved management source CIDRs and the actual SSH port are required before any nftables changes.
+    - name: Install nftables package
+      ansible.builtin.dnf:
+        name: nftables
+        state: present
+    - name: Collect service facts before selecting firewall backend
+      ansible.builtin.service_facts: null
+    - name: Stop, disable and mask firewalld when nftables is selected
+      ansible.builtin.systemd_service:
+        name: firewalld.service
+        state: stopped
+        enabled: false
+        masked: true
+      when:
+      - cis_firewall_backend == 'nftables'
+      - '''firewalld.service'' in ansible_facts.services'
+    - name: Ensure nftables is unmasked before activation
+      ansible.builtin.systemd_service:
+        name: nftables.service
+        masked: false
+      when: cis_firewall_backend == 'nftables'
+    - name: Create nftables configuration directory
+      ansible.builtin.file:
+        path: /etc/nftables
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+    - name: Install validated CIS nftables rules
+      ansible.builtin.template:
+        src: cis-nftables.nft.j2
+        dest: /etc/nftables/cis-rhel9.nft
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+        validate: /usr/sbin/nft -c -f %s
+      register: cis_nftables_rules
+    - name: Configure nftables service loader
+      ansible.builtin.copy:
+        dest: /etc/sysconfig/nftables.conf
+        owner: root
+        group: root
+        mode: '0600'
+        backup: false
+        content: |
+          include "/etc/nftables/cis-rhel9.nft"
+      register: cis_nftables_loader
+    - name: Enable and start nftables with approved rules
+      ansible.builtin.systemd_service:
+        name: nftables.service
+        enabled: true
+        state: restarted
+      when: cis_nftables_rules.changed or cis_nftables_loader.changed
+    - name: Ensure nftables remains enabled and active
+      ansible.builtin.systemd_service:
+        name: nftables.service
+        enabled: true
+        state: started
+      when: cis_firewall_backend == 'nftables'
+  - name: 1.1.2.1.4 | Preserve and secure existing /tmp mount
+    when: '''1.1.2.1.4'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 1.1.2.1.4 | Read the existing fstab mount
+      ansible.builtin.shell: |-
+        python3 - <<'PYM'
+        import json
+        rows=[]
+        for line in open('/etc/fstab'):
+            f=line.split()
+            if f and not f[0].startswith('#') and len(f)>=4 and f[1]=='/tmp':
+                rows.append(dict(src=f[0],fstype=f[2],opts=f[3],dump=f[4] if len(f)>4 else '0',passno=f[5] if len(f)>5 else '0'))
+        if len(rows)!=1: raise SystemExit('Expected exactly one /tmp entry in /etc/fstab; no mount layout changes were attempted')
+        print(json.dumps(rows[0]))
+        PYM
+      args:
+        executable: /bin/bash
+      register: cis_tmp_entry
+      changed_when: false
+    - name: 1.1.2.1.4 | Add noexec and ensure mount is active
+      ansible.posix.mount:
+        path: /tmp
+        src: '{{ (cis_tmp_entry.stdout | from_json).src }}'
+        fstype: '{{ (cis_tmp_entry.stdout | from_json).fstype }}'
+        opts: '{{ ((cis_tmp_entry.stdout | from_json).opts.split('','') | difference([''exec'']) | union([''noexec'']))
+          | join('','') }}'
+        dump: '{{ (cis_tmp_entry.stdout | from_json).dump }}'
+        passno: '{{ (cis_tmp_entry.stdout | from_json).passno }}'
+        state: mounted
+        backup: false
+    - name: 1.1.2.1.4 | Ensure live mount has noexec
+      ansible.posix.mount:
+        path: /tmp
+        state: remounted
+  - name: 2.4.1.7 | Secure cron.d directory
+    ansible.builtin.file:
+      path: /etc/cron.d
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+    become: true
+    when: '''2.4.1.7'' in cis_custom_remediation_ids'
+  - name: 5.3.3.2.7 | Enforce password quality for root
+    when: '''5.3.3.2.7'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.3.3.2.7 | Ensure libpwquality is installed
+      ansible.builtin.dnf:
+        name: libpwquality
+        state: present
+    - name: 5.3.3.2.7 | Configure root enforcement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: ^\s*enforce_for_root\b.*$
+        line: enforce_for_root
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+  - name: 5.3.3.3.2 | Enforce password history for root
+    ansible.builtin.lineinfile:
+      path: /etc/security/pwhistory.conf
+      regexp: ^\s*enforce_for_root\b.*$
+      line: enforce_for_root
+      create: true
+      owner: root
+      group: root
+      mode: '0644'
+      backup: false
+    become: true
+    when: '''5.3.3.3.2'' in cis_custom_remediation_ids'
+  - name: 6.1.3 | Protect audit tools with AIDE cryptographic rules
+    when: '''6.1.3'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 6.1.3 | Ensure AIDE is installed
+      ansible.builtin.dnf:
+        name: aide
+        state: present
+    - name: 6.1.3 | Check audit tool paths
+      ansible.builtin.stat:
+        path: /usr/sbin/{{ item }}
+      loop:
+      - auditctl
+      - auditd
+      - ausearch
+      - aureport
+      - autrace
+      - augenrules
+      register: cis_extra_audit_tools
+    - name: 6.1.3 | Require installed audit tools
+      ansible.builtin.assert:
+        that:
+        - item.stat.exists | default(false)
+        - item.stat.isreg | default(false)
+        fail_msg: 'Required audit tool is missing: {{ item.item }}'
+      loop: '{{ cis_extra_audit_tools.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+    - name: 6.1.3 | Configure SHA512 integrity rules
+      ansible.builtin.blockinfile:
+        path: /etc/aide.conf
+        marker: '# {mark} CIS audit tool integrity'
+        block: |-
+          /usr/sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512
+          /usr/sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512
+          /usr/sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512
+          /usr/sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
+          /usr/sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
+          /usr/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
+        backup: false
+        validate: /usr/sbin/aide --config %s --config-check
+  - name: 7.2.9 | Remediate recursive interactive-user dotfile access
+    become: true
+    when: '''7.2.9'' in cis_custom_remediation_ids'
+    ansible.builtin.shell: |
+      python3 - remediate <<'CIS_DOTFILES_SCRIPT'
+      {{ lookup('ansible.builtin.file', role_path ~ '/files/cis_dotfiles_access.py') }}
+      CIS_DOTFILES_SCRIPT
+    args:
+      executable: /bin/bash
+    register: cis_dotfile_remediation
+    changed_when: '''CHANGED:'' in cis_dotfile_remediation.stdout'
+  - name: 5.3.3.2.1 | Configure difok
+    when: '''5.3.3.2.1'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.3.3.2.1 | Require valid policy value
+      ansible.builtin.assert:
+        that:
+        - cis_password_difok | int >= 2
+    - name: 5.3.3.2.1 | Ensure libpwquality is installed
+      ansible.builtin.dnf:
+        name: libpwquality
+        state: present
+    - name: 5.3.3.2.1 | Find password policy fragments
+      ansible.builtin.find:
+        paths: /etc/security/pwquality.conf.d
+        patterns: '*.conf'
+        file_type: file
+      register: cis_extra_pwquality_fragments
+    - name: 5.3.3.2.1 | Remove duplicate fragment assignments
+      ansible.builtin.lineinfile:
+        path: '{{ item.path }}'
+        regexp: ^\s*difok\s*=.*$
+        state: absent
+        backup: false
+      loop: '{{ cis_extra_pwquality_fragments.files }}'
+      loop_control:
+        label: '{{ item.path }}'
+    - name: 5.3.3.2.1 | Set approved policy value
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: ^\s*difok\s*=.*$
+        line: difok={{ cis_password_difok }}
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+  - name: 5.3.3.2.4 | Configure maxrepeat
+    when: '''5.3.3.2.4'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.3.3.2.4 | Require valid policy value
+      ansible.builtin.assert:
+        that:
+        - cis_password_maxrepeat | int >= 1
+        - cis_password_maxrepeat | int <= 3
+    - name: 5.3.3.2.4 | Ensure libpwquality is installed
+      ansible.builtin.dnf:
+        name: libpwquality
+        state: present
+    - name: 5.3.3.2.4 | Find password policy fragments
+      ansible.builtin.find:
+        paths: /etc/security/pwquality.conf.d
+        patterns: '*.conf'
+        file_type: file
+      register: cis_extra_pwquality_fragments
+    - name: 5.3.3.2.4 | Remove duplicate fragment assignments
+      ansible.builtin.lineinfile:
+        path: '{{ item.path }}'
+        regexp: ^\s*maxrepeat\s*=.*$
+        state: absent
+        backup: false
+      loop: '{{ cis_extra_pwquality_fragments.files }}'
+      loop_control:
+        label: '{{ item.path }}'
+    - name: 5.3.3.2.4 | Set approved policy value
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: ^\s*maxrepeat\s*=.*$
+        line: maxrepeat={{ cis_password_maxrepeat }}
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+  - name: 5.3.3.2.5 | Configure maxsequence
+    when: '''5.3.3.2.5'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.3.3.2.5 | Require valid policy value
+      ansible.builtin.assert:
+        that:
+        - cis_password_maxsequence | int >= 1
+        - cis_password_maxsequence | int <= 3
+    - name: 5.3.3.2.5 | Ensure libpwquality is installed
+      ansible.builtin.dnf:
+        name: libpwquality
+        state: present
+    - name: 5.3.3.2.5 | Find password policy fragments
+      ansible.builtin.find:
+        paths: /etc/security/pwquality.conf.d
+        patterns: '*.conf'
+        file_type: file
+      register: cis_extra_pwquality_fragments
+    - name: 5.3.3.2.5 | Remove duplicate fragment assignments
+      ansible.builtin.lineinfile:
+        path: '{{ item.path }}'
+        regexp: ^\s*maxsequence\s*=.*$
+        state: absent
+        backup: false
+      loop: '{{ cis_extra_pwquality_fragments.files }}'
+      loop_control:
+        label: '{{ item.path }}'
+    - name: 5.3.3.2.5 | Set approved policy value
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: ^\s*maxsequence\s*=.*$
+        line: maxsequence={{ cis_password_maxsequence }}
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+  - name: 1.7.3 | Configure approved remote login banner
+    when: '''1.7.3'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 1.7.3 | Require approved remote banner
+      ansible.builtin.assert:
+        that:
+        - cis_remote_login_banner_text is defined
+        - cis_remote_login_banner_text | default('') | trim | length > 0
+        fail_msg: Configure cis_remote_login_banner_text.
+    - name: 1.7.3 | Write approved remote banner
+      ansible.builtin.copy:
+        dest: /etc/issue.net
+        content: '{{ cis_remote_login_banner_text }}'
+        owner: root
+        group: root
+        mode: '0644'
+        backup: false
+  - name: 5.1.20 | Disable SSH root login across the active configuration tree
+    when: '''5.1.20'' in cis_custom_remediation_ids'
+    become: true
+    block:
+    - name: 5.1.20 | Identify snapshotted SSH configuration files
+      ansible.builtin.set_fact:
+        cis_sshd_policy_files: '{{ cis_prechange_backup_plan.stdout | from_json | selectattr(''control_ids'', ''contains'',
+          ''5.1.20'') | list }}'
+    - name: 5.1.20 | Identify the physical main configuration file
+      ansible.builtin.set_fact:
+        cis_sshd_main_file: '{{ (cis_sshd_policy_files | selectattr(''aliases'', ''contains'', cis_sshd_config_file
+          | default(''/etc/ssh/sshd_config'')) | first).path }}'
+    - name: 5.1.20 | Validate existing SSH configuration before changes
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+    - name: 5.1.20 | Normalize root-login settings in included files
+      ansible.builtin.replace:
+        path: '{{ item.path }}'
+        regexp: (?im)^([ \t]*PermitRootLogin[ \t=]+)\S+([^\r\n]*)$
+        replace: \g<1>no\g<2>
+        backup: false
+      loop: '{{ cis_sshd_policy_files }}'
+      loop_control:
+        label: '{{ item.path }}'
+      when: item.path != cis_sshd_main_file
+      register: cis_sshd_root_include_changes
+    - name: 5.1.20 | Read main SSH configuration
+      ansible.builtin.slurp:
+        src: '{{ cis_sshd_main_file }}'
+      register: cis_sshd_main_content
+      no_log: true
+    - name: 5.1.20 | Build a single global root-login directive
+      ansible.builtin.set_fact:
+        cis_sshd_root_expected: |-
+          PermitRootLogin no
+          {{ (cis_sshd_main_content.content | b64decode) | regex_replace('(?im)^[ \t]*PermitRootLogin[ \t=]+[^\r\n]*(?:\r?\n|$)', '') }}
+      no_log: true
+    - name: 5.1.20 | Write canonical SSH root-login configuration
+      ansible.builtin.copy:
+        dest: '{{ cis_sshd_main_file }}'
+        content: '{{ cis_sshd_root_expected }}'
+        backup: false
+        validate: /usr/sbin/sshd -t -f %s
+      register: cis_sshd_root_main_change
+    - name: 5.1.20 | Verify complete SSH configuration syntax
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -t
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+    - name: 5.1.20 | Read effective global root-login policy
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -T
+        - -f
+        - '{{ cis_sshd_main_file }}'
+      changed_when: false
+      check_mode: false
+      register: cis_sshd_root_global_policy
+    - name: 5.1.20 | Read effective root connection policy
+      ansible.builtin.command:
+        argv:
+        - /usr/sbin/sshd
+        - -T
+        - -f
+        - '{{ cis_sshd_main_file }}'
+        - -C
+        - user=root,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport={{ ansible_port | default(22) }}
+      changed_when: false
+      check_mode: false
+      register: cis_sshd_root_connection_policy
+    - name: 5.1.20 | Require effective root login to be disabled
+      ansible.builtin.assert:
+        that:
+        - '''permitrootlogin no'' in cis_sshd_root_global_policy.stdout_lines'
+        - '''permitrootlogin no'' in cis_sshd_root_connection_policy.stdout_lines'
+        fail_msg: Effective SSH root login is not disabled. Review Include/Match settings; sshd was not reloaded.
+      when: not ansible_check_mode
+    - name: 5.1.20 | Reload SSH only after verified configuration changes
+      ansible.builtin.systemd_service:
+        name: sshd
+        state: reloaded
+      when:
+      - not ansible_check_mode
+      - cis_sshd_root_main_change.changed or (cis_sshd_root_include_changes.results | selectattr('changed', 'equalto',
+        true) | list | length > 0)
+  - name: Apply collection remediation for proven failures only
+    ansible.builtin.include_role:
+      name: trippsc2.cis.rhel9
+      allow_duplicates: true
+    vars:
+      rhel9cis_ipv6_needed: '{{ cis_ipv6_policy == ''disabled'' }}'
+      rhel9cis_use_motd: true
+      rhel9cis_use_issue: true
+      rhel9cis_use_issue_net: true
+      rhel9cis_motd_banner: '{{ cis_motd_banner_text }}'
+      rhel9cis_issue_banner: '{{ cis_local_login_banner_text }}'
+      rhel9cis_issue_net_banner: '{{ cis_remote_login_banner_text }}'
+      rhel9cis_chrony_servers: '{{ cis_chrony_sources }}'
+      rhel9cis_firewall: '{{ cis_firewall_backend if cis_firewall_backend in [''firewalld'', ''nftables''] else
+        omit }}'
+      rhel9cis_sshd_allow_users: '{{ cis_ssh_allowed_users }}'
+      rhel9cis_sshd_allow_groups: '{{ cis_ssh_allowed_groups }}'
+      rhel9cis_sshd_deny_users: '{{ cis_ssh_denied_users }}'
+      rhel9cis_sshd_deny_groups: '{{ cis_ssh_denied_groups }}'
+      rhel9cis_sshd_client_alive_interval: '{{ cis_ssh_client_alive_interval }}'
+      rhel9cis_sshd_client_alive_count_max: '{{ cis_ssh_client_alive_count_max }}'
+      rhel9cis_sudo_log_file: '{{ cis_sudo_log_file }}'
+      rhel9cis_lockout_failed_attempts: '{{ cis_password_failed_attempts }}'
+      rhel9cis_lockout_unlock_time: '{{ cis_password_unlock_time }}'
+      rhel9cis_password_min_length: '{{ cis_password_min_length }}'
+      rhel9cis_passwords_remembered: '{{ cis_password_history }}'
+      rhel9cis_password_expiration_warning_days: '{{ cis_password_warning_days }}'
+      rhel9cis_syslog: '{{ cis_logging_backend }}'
+      rhel9cis_remote_log_server: '{{ cis_remote_log_host }}'
+      rhel9cis_journald_systemmaxuse: '{{ cis_journald_system_max_use | default(''10M'', true) }}'
+      rhel9cis_journald_systemkeepfree: '{{ cis_journald_system_keep_free | default(''100G'', true) }}'
+      rhel9cis_journald_runtimemaxuse: '{{ cis_journald_runtime_max_use | default(''10M'', true) }}'
+      rhel9cis_journald_runtimekeepfree: '{{ cis_journald_runtime_keep_free | default(''100G'', true) }}'
+      rhel9cis_journald_maxfilesec: '{{ cis_journald_max_file_sec | default(''1month'', true) }}'
+      rhel9cis_journal_server_key_file: |-
+        {{
+          cis_journal_upload_server_key_file
+          | default('/etc/ssl/private/journal-upload.pem', true)
+        }}
+      rhel9cis_journal_server_cert_file: |-
+        {{
+          cis_journal_upload_server_certificate_file
+          | default('/etc/ssl/certs/journal-upload.pem', true)
+        }}
+      rhel9cis_journal_server_trusted_cert_file: |-
+        {{
+          cis_journal_upload_trusted_certificate_file
+          | default('/etc/ssl/ca/trusted.pem', true)
+        }}
+      rhel9cis_logrotate_frequency: '{{ cis_rsyslog_rotation_frequency }}'
+      _rhel9cis_expected_crypto_policy: |-
+        {{ rhel9cis_crypto_policy }}{{ ':NO-SHA1'
+             if '1.6.3' in cis_remediation_ids else ''
+        }}{{ ':NO-WEAKMAC'
+             if '1.6.4' in cis_remediation_ids else ''
+        }}{{ ':NO-SSHCBC'
+             if '1.6.5' in cis_remediation_ids else ''
+        }}{{ ':NO-SSHCHACHA20'
+             if '1.6.6' in cis_remediation_ids else ''
+        }}{{ ':NO-SSHETM'
+             if '1.6.7' in cis_remediation_ids else ''
+        }}{% for cis_crypto_subpolicy in
+                  rhel9cis_additional_crypto_subpolicies | default([])
+        %}:{{ cis_crypto_subpolicy }}{% endfor %}
+    when: cis_collection_remediation_ids | length > 0
+  - name: Apply pending CIS collection handlers before post-validation
+    ansible.builtin.meta: flush_handlers
+  - name: Retain only changed-file backups and remove unchanged snapshots
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
+
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        records=[];entries=[]
+        retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
+        for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+            if item['path'] in retained:
+                record=dict(retained[item['path']])
+                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
+                records.append(record)
+        try:
+            entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
+            for entry in entries:
+                path=entry['path'];after=fingerprint(path)
+                snapshot=entry['snapshot'];destination=entry['destination']
+                published=os.path.lexists(destination)
+                if published:
+                    if not stat.S_ISREG(os.lstat(destination).st_mode):raise ValueError('Backup destination is not a regular file: '+destination)
+                    # Permit retry after partial finalization, never overwrite another backup.
+                    if os.path.exists(snapshot):
+                        if not os.path.samefile(snapshot,destination):raise ValueError('Backup path already exists: '+destination)
+                    elif fingerprint(destination)[0]!=entry['before'][0]:
+                        raise ValueError('Previously retained backup is inconsistent: '+destination)
+                if after==entry['before'] and not published:continue
+                if not published:
+                    fd=os.open(snapshot,os.O_RDONLY|os.O_NOFOLLOW)
+                    try:
+                        info=os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                            raise ValueError('Pre-change snapshot is not an independent regular file: '+snapshot)
+                        digest=hashlib.sha256()
+                        while True:
+                            part=os.read(fd,1024*1024)
+                            if not part:break
+                            digest.update(part)
+                        if digest.hexdigest()!=entry['before'][0]:
+                            raise ValueError('Pre-change snapshot contents changed: '+snapshot)
+                        # Change permissions through the verified descriptor, never a followed link.
+                        os.fchown(fd,os.geteuid(),os.getegid());os.fchmod(fd,0o600)
+                        os.link(snapshot,destination,follow_symlinks=False)
+                        retained=os.lstat(destination)
+                        if (retained.st_dev,retained.st_ino)!=(info.st_dev,info.st_ino):
+                            raise ValueError('Snapshot changed while publishing backup: '+snapshot)
+                    finally:
+                        os.close(fd)
+                records.append(dict(original_file=path,changed_file=path,backup_file=destination,
+                                    change_type='deleted' if after is None else 'modified',
+                                    control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            # Clean up only after all changed files have verified retained backups.
+            for entry in entries:
+                if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+        except (OSError,ValueError,KeyError) as error:
+            recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
+    register: cis_backup_finish_result
+    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
+      length) > 0
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+    tags:
+    - cis_changed_file_backups
+  - name: Remember original backups across all controls in this run
+    ansible.builtin.set_fact:
+      cis_run_file_backups: >-
+        {{ ((cis_run_file_backups | default([])
+             | rejectattr('original_file', 'in', cis_finished_backup_paths) | list)
+             + cis_finished_backup_records) }}
+    vars:
+      cis_finished_backup_records: "{{ (cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) }}"
+      cis_finished_backup_paths: "{{ cis_finished_backup_records | map(attribute='original_file') | list }}"
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+  rescue:
+  - name: Retain changed-file backups after failed remediation
+    become: true
+    ansible.builtin.command:
+      argv:
+      - python3
+      - -c
+      - |
+        import base64,hashlib,json,os,shutil,stat,subprocess,sys,tempfile
+        from datetime import datetime,timezone
+
+        def fingerprint(path):
+            try:info=os.stat(path)
+            except FileNotFoundError:return None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('Expected a regular file: '+path)
+            digest=hashlib.sha256()
+            with open(path,'rb') as stream:
+                for part in iter(lambda:stream.read(1024*1024),b''):digest.update(part)
+            attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
+            return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
+
+        records=[];entries=[]
+        retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
+        for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
+            if item['path'] in retained:
+                record=dict(retained[item['path']])
+                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
+                records.append(record)
+        try:
+            entries=json.loads(os.environ['CIS_BACKUP_TRANSACTION'])['entries']
+            for entry in entries:
+                path=entry['path'];after=fingerprint(path)
+                snapshot=entry['snapshot'];destination=entry['destination']
+                published=os.path.lexists(destination)
+                if published:
+                    if not stat.S_ISREG(os.lstat(destination).st_mode):raise ValueError('Backup destination is not a regular file: '+destination)
+                    # Permit retry after partial finalization, never overwrite another backup.
+                    if os.path.exists(snapshot):
+                        if not os.path.samefile(snapshot,destination):raise ValueError('Backup path already exists: '+destination)
+                    elif fingerprint(destination)[0]!=entry['before'][0]:
+                        raise ValueError('Previously retained backup is inconsistent: '+destination)
+                if after==entry['before'] and not published:continue
+                if not published:
+                    fd=os.open(snapshot,os.O_RDONLY|os.O_NOFOLLOW)
+                    try:
+                        info=os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                            raise ValueError('Pre-change snapshot is not an independent regular file: '+snapshot)
+                        digest=hashlib.sha256()
+                        while True:
+                            part=os.read(fd,1024*1024)
+                            if not part:break
+                            digest.update(part)
+                        if digest.hexdigest()!=entry['before'][0]:
+                            raise ValueError('Pre-change snapshot contents changed: '+snapshot)
+                        # Change permissions through the verified descriptor, never a followed link.
+                        os.fchown(fd,os.geteuid(),os.getegid());os.fchmod(fd,0o600)
+                        os.link(snapshot,destination,follow_symlinks=False)
+                        retained=os.lstat(destination)
+                        if (retained.st_dev,retained.st_ino)!=(info.st_dev,info.st_ino):
+                            raise ValueError('Snapshot changed while publishing backup: '+snapshot)
+                    finally:
+                        os.close(fd)
+                records.append(dict(original_file=path,changed_file=path,backup_file=destination,
+                                    change_type='deleted' if after is None else 'modified',
+                                    control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            # Clean up only after all changed files have verified retained backups.
+            for entry in entries:
+                if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+        except (OSError,ValueError,KeyError) as error:
+            recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            sys.exit(2)
+    environment:
+      CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
+      CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
+      CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
+    register: cis_backup_finish_result
+    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
+      length) > 0
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+    tags:
+    - cis_changed_file_backups
+    failed_when: false
+  - name: Remember original backups across all controls in this run
+    ansible.builtin.set_fact:
+      cis_run_file_backups: >-
+        {{ ((cis_run_file_backups | default([])
+             | rejectattr('original_file', 'in', cis_finished_backup_paths) | list)
+             + cis_finished_backup_records) }}
+    vars:
+      cis_finished_backup_records: "{{ (cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) }}"
+      cis_finished_backup_paths: "{{ cis_finished_backup_records | map(attribute='original_file') | list }}"
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+  - name: Record failed remediation control
+    ansible.builtin.set_fact:
+      cis_remediation_errors: |-
+        {{ cis_remediation_errors | default([]) + [{
+          'control_id': cis_remediation_control_id,
+          'task': ansible_failed_task.name | default('Unknown task'),
+          'message': (
+            'REDACTED: Ansible no_log task'
+            if (ansible_failed_result._ansible_no_log | default(false) | bool)
+               or (ansible_failed_task.no_log | default(false) | bool)
+            else ansible_failed_result.msg | default('Task failed')
+          ),
+          'rc': ansible_failed_result.rc | default('not returned')
+        }] }}
+  - name: Emit failed remediation evidence before stopping
+    ansible.builtin.debug:
+      msg:
+        cis_report_payload:
+          stage: final
+          operation: '{{ cis_operation }}'
+          host: '{{ inventory_hostname }}'
+          results: '{{ cis_pre_validation_results | default([]) }}'
+          post_results: []
+          remediation_attempted: '{{ cis_remediation_ids | default([]) }}'
+          remediation_errors: '{{ cis_remediation_errors | default([]) }}'
+  - name: Stop remediation on failure
+    ansible.builtin.fail:
+      msg: Remediation failed. Review the failed task and recorded evidence before further changes. No automatic
+        rollback was attempted.
