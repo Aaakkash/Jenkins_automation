@@ -381,6 +381,13 @@ class CallbackModule(CallbackBase):
                     str(item)
                     for item in (payload.get("remediation_skipped_by_policy") or [])
                 }
+            # Configured skip IDs apply even when validation returns a status
+            # other than NON_COMPLIANT, such as CONFIG_VALUE_MISSING.
+            skip_reasons = payload.get("remediation_skip_reasons") or {}
+            skipped_by_policy.update(
+                str(item)
+                for item in (skip_reasons.get("configured_skip_ids") or [])
+            )
             stage_priority = {
                 "pre": 1,
                 "remediation": 2,
@@ -435,13 +442,15 @@ class CallbackModule(CallbackBase):
 
             if operation == "validate":
                 final_status = pre_status
-            elif pre_status != "NON_COMPLIANT":
-                final_status = pre_status
+            elif pre_status == "COMPLIANT":
+                final_status = "COMPLIANT"
             elif (
                 control_id in state["skipped_by_policy"]
                 and control_id not in attempted
             ):
                 final_status = "REMEDIATION_SKIPPED_BY_POLICY"
+            elif pre_status != "NON_COMPLIANT":
+                final_status = pre_status
             elif control_id not in attempted:
                 final_status = "REMEDIATION_NOT_ATTEMPTED"
             elif state['errors']:
@@ -456,6 +465,20 @@ class CallbackModule(CallbackBase):
                 final_status = "REMEDIATION_INCOMPLETE"
             else:
                 final_status = post_status
+
+            if (
+                operation == "remediate"
+                and control_id in state["skipped_by_policy"]
+                and control_id not in attempted
+            ):
+                policy_message = (
+                    "Remediation skipped by site-policy configuration. "
+                    f"Validation result: {pre_status}."
+                )
+                # Retain any existing task/failure evidence alongside the reason.
+                remediation_summary = "\n".join(
+                    part for part in (policy_message, remediation_summary) if part
+                )
 
             rows.append(
                 {
