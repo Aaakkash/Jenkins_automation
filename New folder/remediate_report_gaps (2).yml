@@ -283,12 +283,17 @@
                 alias=path;path=os.path.realpath(path)
                 if excluded(path):return
                 try:info=os.stat(path)
-                except FileNotFoundError:return
+                except FileNotFoundError:
+                    targets[path].add(control);aliases[path].add(alias)
+                    return
                 if stat.S_ISREG(info.st_mode):
                     targets[path].add(control);aliases[path].add(alias)
             def patterns(values,control):
                 for pattern in values:
-                    for path in glob.glob(pattern,recursive=True):add(path,control)
+                    if glob.has_magic(pattern):
+                        for path in glob.glob(pattern,recursive=True):add(path,control)
+                    else:
+                        add(pattern,control)
             for kind,ids in [('custom',custom_ids),('collection',collection_ids)]:
                 for control in ids:patterns(maps[kind].get(control,[]),control)
             if '5.1.20' in custom_ids:
@@ -362,7 +367,7 @@
                     if result.returncode:raise ValueError('Cannot discover local mounts for file backups')
                     roots=result.stdout.splitlines()
                 for base in roots:
-                    result=subprocess.run(['find',base,'-xdev','-type','f','-perm','-0002','-print0'],capture_output=True)
+                    result=subprocess.run(['find',base,'-xdev']+['(', '-type', 'd', '-name', '.cis_prechange_*', ')', '-prune', '-o', '(', '-name', 'backup_CIS_remediation_*', '-o', '-name', '*-backup_CIS_remediation_*', ')', '-prune', '-o']+['-type','f','-perm','-0002','-print0'],capture_output=True)
                     if result.returncode:raise ValueError('Cannot identify world-writable files for backup: '+os.fsdecode(result.stderr))
                     for path in result.stdout.split(b'\0'):
                         if path:add(os.fsdecode(path),'7.1.11')
@@ -405,18 +410,24 @@
             attrs=[[key,base64.b64encode(os.getxattr(path,key)).decode()] for key in sorted(os.listxattr(path))]
             return [digest.hexdigest(),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_mtime_ns,attrs]
 
-        entries=[]
+        entries=[];absent=[]
         try:
             stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
             retained={entry['original_file']:entry for entry in json.loads(os.environ['CIS_RUN_FILE_BACKUPS'])}
             for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
                 path=item['path']
                 if path in retained:
-                    if not os.path.isfile(retained[path]['backup_file']):
-                        raise ValueError('Original backup is missing: '+retained[path]['backup_file'])
+                    prior=retained[path]
+                    if prior.get('backup_file'):
+                        if not os.path.isfile(prior['backup_file']):
+                            raise ValueError('Original backup is missing: '+prior['backup_file'])
+                    elif prior.get('change_type')!='created':
+                        raise ValueError('Invalid original-file ledger entry: '+path)
                     continue
                 before=fingerprint(path)
-                if before is None:continue
+                if before is None:
+                    absent.append(item)
+                    continue
                 directory=tempfile.mkdtemp(prefix='.cis_prechange_'+stamp+'_',dir=os.path.dirname(path))
                 os.chmod(directory,0o700)
                 name='backup_CIS_remediation_'+os.path.basename(path)+'_'+stamp+'.bak'
@@ -444,7 +455,7 @@
                     os.close(directory_fd)
                 if fingerprint(path)!=before or fingerprint(entry['snapshot'])!=before:
                     raise ValueError('Snapshot mismatch or concurrent file change: '+path)
-            print(json.dumps({'entries':entries}))
+            print(json.dumps({'entries':entries,'absent':absent}))
         except (OSError,ValueError) as error:
             for entry in entries:
                 shutil.rmtree(entry['directory'],ignore_errors=True)
@@ -463,6 +474,15 @@
       cis_backup_transaction: '{{ cis_backup_prepare_result.stdout | from_json }}'
       cis_backup_transaction_ready: true
     when: not ansible_check_mode
+  - name: Report paths absent before tracked remediation
+    ansible.builtin.debug:
+      msg:
+        cis_backup_absent_paths: "{{ cis_backup_transaction.absent | default([]) }}"
+    when:
+    - not ansible_check_mode
+    - cis_backup_transaction_ready | default(false) | bool
+    tags:
+    - cis_backup_prepare
   - name: Load collection rule reset values
     ansible.builtin.include_vars:
       file: '{{ role_path }}/vars/disable_all.yml'
@@ -1566,6 +1586,23 @@
         - find
         - '{{ item }}'
         - -xdev
+        - '('
+        - -type
+        - d
+        - -name
+        - .cis_prechange_*
+        - ')'
+        - -prune
+        - -o
+        - '('
+        - -name
+        - backup_CIS_remediation_*
+        - -o
+        - -name
+        - '*-backup_CIS_remediation_*'
+        - ')'
+        - -prune
+        - -o
         - -type
         - f
         - -perm
@@ -1595,6 +1632,23 @@
         - find
         - '{{ item }}'
         - -xdev
+        - '('
+        - -type
+        - d
+        - -name
+        - .cis_prechange_*
+        - ')'
+        - -prune
+        - -o
+        - '('
+        - -name
+        - backup_CIS_remediation_*
+        - -o
+        - -name
+        - '*-backup_CIS_remediation_*'
+        - ')'
+        - -prune
+        - -o
         - -type
         - d
         - -perm
@@ -2712,7 +2766,10 @@
         for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
             if item['path'] in retained:
                 record=dict(retained[item['path']])
-                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['backup_status']='BACKUP_REUSED' if record.get('backup_file') else 'NEW_FILE_NO_ORIGINAL'
+                # Scope this event to the controls in this transaction. The
+                # original creation provenance is stored separately.
+                record['control_ids']=item['control_ids']
                 record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
                 records.append(record)
         try:
@@ -2752,23 +2809,33 @@
                         os.close(fd)
                 records.append(dict(original_file=path,changed_file=path,backup_file=destination,
                                     change_type='deleted' if after is None else 'modified',
+                                    backup_status='BACKUP_CREATED',
+                                    backup_created_control_ids=entry['control_ids'],
                                     control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            for item in json.loads(os.environ['CIS_BACKUP_TRANSACTION']).get('absent',[]):
+                path=item['path']
+                # A missing target that becomes a directory is not a file backup.
+                if os.path.isfile(path):
+                    records.append(dict(original_file=path,changed_file=path,backup_file=None,
+                                        change_type='created',backup_status='NEW_FILE_NO_ORIGINAL',
+                                        control_ids=item['control_ids'],original_aliases=item.get('aliases',[])))
             # Clean up only after all changed files have verified retained backups.
             for entry in entries:
                 if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
-            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for item in json.loads(os.environ['CIS_BACKUP_PLAN']) for c in item['control_ids']})}))
         except (OSError,ValueError,KeyError) as error:
             recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
             print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
-                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for item in json.loads(os.environ['CIS_BACKUP_PLAN']) for c in item['control_ids']})}))
             sys.exit(2)
     environment:
       CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
       CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
       CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
     register: cis_backup_finish_result
-    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
-      length) > 0
+    changed_when: >-
+      ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', [])
+       | selectattr('backup_status', 'equalto', 'BACKUP_CREATED') | list | length) > 0
     when:
     - not ansible_check_mode
     - cis_backup_transaction_ready | default(false) | bool
@@ -2812,7 +2879,10 @@
         for item in json.loads(os.environ['CIS_BACKUP_PLAN']):
             if item['path'] in retained:
                 record=dict(retained[item['path']])
-                record['control_ids']=sorted(set(record.get('control_ids',[])+item['control_ids']))
+                record['backup_status']='BACKUP_REUSED' if record.get('backup_file') else 'NEW_FILE_NO_ORIGINAL'
+                # Scope this event to the controls in this transaction. The
+                # original creation provenance is stored separately.
+                record['control_ids']=item['control_ids']
                 record['original_aliases']=sorted(set(record.get('original_aliases',[])+item.get('aliases',[])))
                 records.append(record)
         try:
@@ -2852,23 +2922,33 @@
                         os.close(fd)
                 records.append(dict(original_file=path,changed_file=path,backup_file=destination,
                                     change_type='deleted' if after is None else 'modified',
+                                    backup_status='BACKUP_CREATED',
+                                    backup_created_control_ids=entry['control_ids'],
                                     control_ids=entry['control_ids'],original_aliases=entry.get('aliases',[])))
+            for item in json.loads(os.environ['CIS_BACKUP_TRANSACTION']).get('absent',[]):
+                path=item['path']
+                # A missing target that becomes a directory is not a file backup.
+                if os.path.isfile(path):
+                    records.append(dict(original_file=path,changed_file=path,backup_file=None,
+                                        change_type='created',backup_status='NEW_FILE_NO_ORIGINAL',
+                                        control_ids=item['control_ids'],original_aliases=item.get('aliases',[])))
             # Clean up only after all changed files have verified retained backups.
             for entry in entries:
                 if os.path.isdir(entry['directory']):shutil.rmtree(entry['directory'])
-            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+            print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,'error':None,'control_ids':sorted({c for item in json.loads(os.environ['CIS_BACKUP_PLAN']) for c in item['control_ids']})}))
         except (OSError,ValueError,KeyError) as error:
             recovery=[entry['directory'] for entry in entries if os.path.isdir(entry['directory'])]
             print(json.dumps({'cis_changed_file_backups':True,'file_backups':records,
-                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for entry in entries for c in entry['control_ids']})}))
+                              'error':str(error),'recovery_snapshot_dirs':recovery,'control_ids':sorted({c for item in json.loads(os.environ['CIS_BACKUP_PLAN']) for c in item['control_ids']})}))
             sys.exit(2)
     environment:
       CIS_BACKUP_TRANSACTION: '{{ cis_backup_transaction | to_json }}'
       CIS_RUN_FILE_BACKUPS: '{{ cis_run_file_backups | default([]) | to_json }}'
       CIS_BACKUP_PLAN: '{{ cis_prechange_backup_plan.stdout }}'
     register: cis_backup_finish_result
-    changed_when: ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', []) |
-      length) > 0
+    changed_when: >-
+      ((cis_backup_finish_result.stdout | default('{}', true) | from_json).get('file_backups', [])
+       | selectattr('backup_status', 'equalto', 'BACKUP_CREATED') | list | length) > 0
     when:
     - not ansible_check_mode
     - cis_backup_transaction_ready | default(false) | bool
