@@ -141,20 +141,16 @@ class CallbackModule(CallbackBase):
             if key not in selected or priority.get(status, 0) > priority.get(selected[key][0], 0):
                 selected[key] = (status, record)
 
-        lines = []
+        pairs = []
         for status, record in selected.values():
             original = record.get('original_file', 'Not returned by module')
             backup = record.get('backup_file')
             if status == 'NEW_FILE_NO_ORIGINAL':
-                backup = 'N/A - absent before tracked remediation'
+                backup = 'Not required - file newly created'
             elif not backup:
-                backup = 'NOT_REPORTED - no verified pre-change backup returned'
-            line = f'File: {original} | Status: {status} | Backup: {backup}'
-            origin = record.get('backup_created_control_ids') or []
-            if status == 'BACKUP_REUSED' and origin:
-                line += ' | First backup controls: ' + ', '.join(map(str, origin))
-            lines.append(line)
-        return '\n'.join(dict.fromkeys(lines))
+                backup = 'Not available - no verified backup reported'
+            pairs.append(f'File: {original}\nBackup: {backup}')
+        return '\n\n'.join(dict.fromkeys(pairs))
 
     @staticmethod
     def _brief(value, limit=1200):
