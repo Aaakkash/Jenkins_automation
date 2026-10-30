@@ -187,6 +187,43 @@ class CallbackModule(CallbackBase):
             lines.append(line)
         return '\n'.join(dict.fromkeys(lines))
 
+    @staticmethod
+    def _remediation_message(control_id, operation, pre_status, final_status,
+                             was_attempted, policy_skipped, events, errors, checkpoint=""):
+        """Describe the result without exposing Ansible task/module details."""
+        if errors:
+            return 'Remediation failed or incomplete - see remediation_error.'
+        if operation == 'validate':
+            return 'Not run - validation-only mode.'
+        if pre_status == 'COMPLIANT':
+            return 'No remediation required - control already compliant.'
+        if policy_skipped and not was_attempted:
+            return 'Remediation skipped by site-policy configuration.'
+        if not was_attempted:
+            if pre_status == 'CONFIG_VALUE_MISSING':
+                return 'Not run - required configuration values missing.'
+            if pre_status == 'VALIDATION_ERROR':
+                return 'Not run - validation could not determine compliance.'
+            if pre_status == 'NOT_APPLICABLE':
+                return 'Not run - control is not applicable.'
+            return 'Not run - no automatic remediation was selected.'
+        if final_status == 'REMEDIATION_COMPLETED':
+            # Use each control's validated objective, not a control-specific
+            # hardcoded action or an inferred edit. Evidence remains separate.
+            objective = ' '.join(str(checkpoint or '').split())
+            objective = re.sub(
+                r'^(?:[0-9]+(?:[.][0-9]+)+\s*[|:-]?\s*)?Ensure\s+',
+                '', objective, flags=re.IGNORECASE,
+            ).strip().rstrip('.')
+            if objective:
+                return f'Remediation completed - {objective}.'
+            return 'Remediation completed - post-validation passed.'
+        if final_status == 'NON_COMPLIANT_AFTER_REMEDIATION':
+            return 'Remediation incomplete - control is still noncompliant after remediation.'
+        if final_status == 'POST_VALIDATION_ERROR':
+            return 'Remediation attempted - post-validation encountered an error.'
+        return 'Remediation attempted - completion could not be confirmed.'
+
     def _record_remediation(self, result, failed=False):
         """Collect real task results between the pre and remediation payloads.
 
@@ -479,7 +516,6 @@ class CallbackModule(CallbackBase):
             state["errors"] = list(state.get("errors") or []) + event_errors
 
             backup_details = self._format_backup_details(events)
-            remediation_summary = self._format_remediation_output(events)
 
             if operation == "validate":
                 final_status = pre_status
@@ -507,19 +543,11 @@ class CallbackModule(CallbackBase):
             else:
                 final_status = post_status
 
-            if (
-                operation == "remediate"
-                and control_id in state["skipped_by_policy"]
-                and control_id not in attempted
-            ):
-                policy_message = (
-                    "Remediation skipped by site-policy configuration. "
-                    f"Validation result: {pre_status}."
-                )
-                # Retain any existing task/failure evidence alongside the reason.
-                remediation_summary = "\n".join(
-                    part for part in (policy_message, remediation_summary) if part
-                )
+            remediation_summary = self._remediation_message(
+                control_id, operation, pre_status, final_status,
+                control_id in attempted, control_id in state['skipped_by_policy'],
+                events, state['errors'], checkpoint=pre.get('checkpoint', ''),
+            )
 
             rows.append(
                 {
@@ -547,24 +575,7 @@ class CallbackModule(CallbackBase):
                     "post_validation": post_status,
                     "final_status": final_status,
                     "pre_validation_output": pre.get("evidence", ""),
-                    "remediation_output": (
-                        remediation_summary
-                        if remediation_summary
-                        else (
-                            "Not run: remediation explicitly skipped by "
-                            "cis_remediation_skip_ids."
-                            if final_status == "REMEDIATION_SKIPPED_BY_POLICY"
-                            else (
-                                "No changed remediation task result was captured; "
-                                "do not infer a change from the final status."
-                                if control_id in attempted
-                                else (
-                                    "Not run: validation only, already compliant, "
-                                    "missing input, unsupported control or skipped by policy."
-                                )
-                            )
-                        )
-                    ),
+                    "remediation_output": remediation_summary,
                     "backup_details": backup_details,
                     "remediation_error": '\n'.join(dict.fromkeys(
                         self._brief(error.get('task', 'Remediation')) + ': '
