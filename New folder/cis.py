@@ -669,7 +669,7 @@ class CallbackModule(CallbackBase):
             evidence_target = target.with_suffix(".evidence.json")
             full_rows = sorted(host_rows, key=control_key)
             with evidence_target.open("w", encoding="utf-8") as stream:
-                json.dump({"schema_version": "2.3.1", "host": host, "rows": full_rows},
+                json.dump({"schema_version": "2.3.2", "host": host, "rows": full_rows},
                           stream, ensure_ascii=False, indent=2)
             os.chmod(evidence_target, 0o600)
             with target.open("w", newline="", encoding="utf-8-sig") as stream:
