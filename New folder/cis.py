@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import ipaddress
 import json
 import os
 import re
@@ -36,6 +37,19 @@ class CallbackModule(CallbackBase):
         self.active_controls: dict[str, str] = {}
         self.backup_absent_paths: dict[str, set[str]] = {}
 
+
+    @staticmethod
+    def _csv_cell(value, evidence_filename):
+        """One physical CSV row per control; preserve full fields in JSON."""
+        text = "" if value is None else str(value)
+        text = re.sub(r"[\r\n\x85\u2028\u2029]+", " | ", text)
+        text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+        # Excel counts UTF-16 code units, not Python code points.
+        if len(text.encode("utf-16-le")) // 2 > 30000:
+            suffix = " [Full value: " + evidence_filename + "]"
+            budget = max(0, 30000 - len(suffix.encode("utf-16-le")) // 2)
+            text = text.encode("utf-16-le")[:budget * 2].decode("utf-16-le", errors="ignore") + suffix
+        return text
 
     @staticmethod
     def _backup_records(action, item, args):
@@ -412,6 +426,13 @@ class CallbackModule(CallbackBase):
             return
         payload = dict(payload)
         payload["host"] = str(payload.get("host") or result._host.get_name())
+        payload["ip_address"] = ""
+        for candidate in (payload.get("connection_address"), payload.get("default_ipv4")):
+            try:
+                payload["ip_address"] = str(ipaddress.ip_address(str(candidate or "")))
+                break
+            except ValueError:
+                pass
         host = payload['host']
         if payload.get('stage') == 'pre':
             self.active_controls.pop(host, None)
@@ -430,10 +451,6 @@ class CallbackModule(CallbackBase):
         if not self.payloads:
             return
 
-        output = Path(
-            os.environ.get("RHEL9_CIS_CSV_OUTPUT", "reports/rhel9_cis_results.csv")
-        )
-        output.parent.mkdir(parents=True, exist_ok=True)
         generated = datetime.now(timezone.utc).isoformat()
         rows = []
         controls: dict[tuple[str, str], dict] = {}
@@ -458,13 +475,7 @@ class CallbackModule(CallbackBase):
                 for item in (skip_reasons.get("configured_skip_ids") or [])
             )
             
-            skip_reasons = payload.get("remediation_skip_reasons") or {}
-            skipped_by_policy.update(
-                str(item)
-                for item in (
-                    skip_reasons.get("configured_skip_ids") or []
-                )
-            )
+
             
             stage_priority = {
                 "pre": 1,
@@ -477,6 +488,11 @@ class CallbackModule(CallbackBase):
                 if key not in controls or stage_priority >= controls[key]["priority"]:
                     controls[key] = {
                         "host": host,
+                        "hostname": payload.get("hostname") or host,
+                        "ip_address": payload.get("ip_address", ""),
+                        "msb_status": payload.get("msb_status", "NOT_RUN"),
+                        "msb_output": payload.get("msb_output", ""),
+                        "msb_backup_details": payload.get("msb_backup_details", ""),
                         "operation": payload.get("operation", "validate"),
                         "pre": pre,
                         "post": post_by_id.get(pre.get("control_id")),
@@ -553,6 +569,10 @@ class CallbackModule(CallbackBase):
                 {
                     "generated_utc": generated,
                     "host": host,
+                    "ip_address": state["ip_address"],
+                    "msb_status": state["msb_status"],
+                    "msb_output": state["msb_output"],
+                    "msb_backup_details": state["msb_backup_details"],
                     "plugin_id": pre.get("plugin_id", ""),
                     "phase": str(pre.get("phase", "")).zfill(2),
                     "control_id": control_id,
@@ -591,6 +611,7 @@ class CallbackModule(CallbackBase):
         fields = [
             "generated_utc",
             "host",
+            "ip_address",
             "plugin_id",
             "phase",
             "control_id",
@@ -617,9 +638,43 @@ class CallbackModule(CallbackBase):
                 [int(part) for part in row["control_id"].split(".")],
             )
 
-        with output.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(sorted(rows, key=control_key))
+        # Each host gets its own report; slashes and IPv6 colons are sanitized.
+        def safe(value):
+            return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")[:120] or "unknown"
 
-        self._display.display(f"RHEL 9 CIS CSV report: {output}", color="green") 
+        used_targets = set()
+        for host in sorted({row["host"] for row in rows}):
+            host_rows = [row for row in rows if row["host"] == host]
+            states = [state for state in controls.values() if state["host"] == host]
+            hostname = safe(states[0]["hostname"])
+            address = safe(host_rows[0]["ip_address"] or "ip_unknown")
+            override = os.environ.get("RHEL9_CIS_CSV_OUTPUT")
+            if override:
+                if "{hostname}" in override or "{ip}" in override or "{host}" in override:
+                    target = Path(override.replace("{hostname}", hostname).replace("{ip}", address).replace("{host}", safe(host)))
+                elif len({row["host"] for row in rows}) == 1:
+                    target = Path(override)
+                else:
+                    custom = Path(override)
+                    target = custom.with_name(custom.stem + "_" + safe(host) + "_" + address + (custom.suffix or ".csv"))
+            else:
+                target = Path(os.environ.get("RHEL9_CIS_CSV_DIR", "reports")) / ("rhel9_cis_results_" + hostname + "_" + address + ".csv")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Distinct inventory aliases may resolve to the same hostname/IP.
+            if str(target.resolve()) in used_targets:
+                target = target.with_name(target.stem + "_" + safe(host) + target.suffix)
+            while str(target.resolve()) in used_targets:
+                target = target.with_name(target.stem + "_duplicate" + target.suffix)
+            used_targets.add(str(target.resolve()))
+            evidence_target = target.with_suffix(".evidence.json")
+            full_rows = sorted(host_rows, key=control_key)
+            with evidence_target.open("w", encoding="utf-8") as stream:
+                json.dump({"schema_version": "2.3.1", "host": host, "rows": full_rows},
+                          stream, ensure_ascii=False, indent=2)
+            os.chmod(evidence_target, 0o600)
+            with target.open("w", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields, quoting=csv.QUOTE_ALL, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows({key: self._csv_cell(row.get(key, ""), evidence_target.name)
+                                  for key in fields} for row in full_rows)
+            self._display.display(f"RHEL 9 CIS CSV report: {target}", color="green")
