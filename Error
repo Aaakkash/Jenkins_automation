@@ -1,0 +1,18 @@
+TASK [rhel9_cis_standard : Fail remediation run when in-scope controls remain unresolved] *******************************************
+[ERROR]: Task failed: Action failed: CIS remediation completed, but the following in-scope controls still do not return validator RC 0: ['2.1.22', '5.4.2.3', '7.1.12', '7.2.5', '5.1.8']. Review the generated CSV evidence before the next run.
+Origin: /home/axp551/Test_New/new_updated/rhel9_cis_standard_2.2.1/RHEL9-CIS-Client-Deployment-v2.3.0/client-deployment/roles/rhel9_cis_standard/tasks/main.yml:489:3
+
+487   tags:
+488   - always
+489 - name: Fail remediation run when in-scope controls remain unresolved
+      ^ column 3
+
+fatal: [rhel9]: FAILED! => {
+    "assertion": "cis_unresolved_post_results | length == 0",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "CIS remediation completed, but the following in-scope controls still do not return validator RC 0: ['2.1.22', '5.4.2.3', '7.1.12', '7.2.5', '5.1.8']. Review the generated CSV evidence before the next run."
+}
+
+PLAY RECAP **************************************************************************************************************************
+rhel9                      : ok=2578 changed=92   unreachable=0    failed=1    skipped=5845 rescued=0    ignored=0
