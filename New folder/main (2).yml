@@ -9,13 +9,13 @@
 - name: Load mandatory site-policy configuration
   no_log: true
   ansible.builtin.include_vars:
-    file: '{{ cis_site_policy_file }}'
+    file: "{{ cis_site_policy_file | default(playbook_dir ~ '/../config/cis_unix_team_inputs.yml') }}"
   tags:
   - always
 - name: Display loaded execution configuration
   ansible.builtin.debug:
     msg:
-      policy_file: '{{ cis_site_policy_file }}'
+      policy_file: "{{ cis_site_policy_file | default(playbook_dir ~ '/../config/cis_unix_team_inputs.yml') }}"
       requested_ids: '{{ cis_requested_control_ids | default([]) }}'
       requested_ids_type: '{{ cis_requested_control_ids | default([]) | type_debug }}'
       firewall_backend: '{{ cis_firewall_backend | default(''UNDEFINED'') }}'
@@ -260,6 +260,8 @@
         | map(attribute='control_id')
         | list
       }}
+    cis_remediation_attempted_ids: []
+    cis_remediation_blocked: []
   tags:
   - always
 - name: Identify firewall controls blocked by site backend policy
@@ -349,27 +351,12 @@
       - '*-backup_CIS_remediation_*'
       - .cis_prechange_*
   block:
-  - name: Apply custom remediations independently
-    ansible.builtin.include_tasks: remediate_report_gaps.yml
-    loop: '{{ cis_remediation_ids | intersect(cis_custom_supported_ids) }}'
+  - name: Apply each selected remediation independently
+    ansible.builtin.include_tasks: remediate_one.yml
+    loop: '{{ cis_selected_control_ids | select(''in'', cis_remediation_ids) | list }}'
     loop_control:
-      loop_var: cis_remediation_control_id
-      label: '{{ cis_remediation_control_id }}'
-    vars:
-      cis_custom_remediation_ids: '{{ [cis_remediation_control_id] }}'
-      cis_collection_remediation_ids: []
-  - name: Apply selected collection remediations in one pass
-    ansible.builtin.include_tasks: remediate_report_gaps.yml
-    vars:
-      cis_remediation_control_id: ''
-      cis_custom_remediation_ids: []
-      cis_collection_remediation_ids: |-
-        {{
-          cis_remediation_ids
-          | difference(cis_custom_supported_ids)
-        }}
-    when:
-    - cis_remediation_ids | difference(cis_custom_supported_ids) | length > 0
+      loop_var: cis_dispatch_control_id
+      label: '{{ cis_dispatch_control_id }}'
   - name: Emit remediation-attempt report payload
     ansible.builtin.debug:
       msg:
@@ -378,11 +365,12 @@
           operation: '{{ cis_operation }}'
           host: '{{ inventory_hostname }}'
           results: '{{ cis_pre_validation_results }}'
-          remediation_attempted: '{{ cis_remediation_ids }}'
+          remediation_attempted: '{{ cis_remediation_attempted_ids | default([]) }}'
           remediation_errors: '{{ cis_remediation_errors | default([]) }}'
           connection_address: '{{ ansible_host | default('''') }}'
           default_ipv4: '{{ ansible_facts.default_ipv4.address | default('''') }}'
           hostname: '{{ ansible_facts.hostname | default(inventory_hostname) }}'
+          remediation_blocked: '{{ cis_remediation_blocked | default([]) }}'
 - name: Run MSB recovery before final validation
   when:
   - cis_operation == 'remediate'
@@ -405,26 +393,14 @@
     ansible.builtin.set_fact:
       cis_msb_status: FAILED
       cis_msb_output: MSB workflow failed; review the failed task and recovery location. No automatic rollback attempted.
-  - name: Emit MSB failure report before stopping this host
-    ansible.builtin.debug:
-      msg:
-        cis_report_payload:
-          stage: final
-          operation: '{{ cis_operation }}'
-          host: '{{ inventory_hostname }}'
-          results: '{{ cis_pre_validation_results }}'
-          post_results: []
-          remediation_attempted: '{{ cis_remediation_ids }}'
-          remediation_errors: '{{ cis_remediation_errors | default([]) }}'
-          msb_status: FAILED
-          msb_output: '{{ cis_msb_output }}'
-          msb_backup_details: '{{ cis_msb_backup_details | default('''') }}'
-          connection_address: '{{ ansible_host | default('''') }}'
-          default_ipv4: '{{ ansible_facts.default_ipv4.address | default('''') }}'
-          hostname: '{{ ansible_facts.hostname | default(inventory_hostname) }}'
   - name: Stop this host after MSB failure
     ansible.builtin.fail:
       msg: MSB workflow failed. Review the report and recovery backup before retrying.
+    when: not (cis_continue_on_remediation_error | default(true) | bool)
+  - name: Continue post-validation after recorded MSB failure
+    ansible.builtin.debug:
+      msg: MSB failed; its result is retained in evidence JSON. Continuing read-only post-validation.
+    when: cis_continue_on_remediation_error | default(true) | bool
 - name: Run read-only post-validation
   ansible.builtin.include_tasks: validation.yml
   vars:
@@ -466,7 +442,7 @@
         host: '{{ inventory_hostname }}'
         results: '{{ cis_pre_validation_results }}'
         post_results: '{{ cis_post_validation_results }}'
-        remediation_attempted: '{{ cis_remediation_ids if cis_operation == ''remediate'' else [] }}'
+        remediation_attempted: '{{ cis_remediation_attempted_ids | default([]) }}'
         remediation_skipped_by_policy: '{{ cis_policy_skipped_ids }}'
         excluded_control_ids: '{{ cis_excluded_control_ids | default([]) }}'
         exclusion_approved_by: '{{ cis_exclusion_approved_by | default(''NOT_PROVIDED'') }}'
@@ -484,6 +460,7 @@
         msb_status: '{{ cis_msb_status | default(''NOT_RUN'') }}'
         msb_output: '{{ cis_msb_output | default('''') }}'
         msb_backup_details: '{{ cis_msb_backup_details | default('''') }}'
+        remediation_blocked: '{{ cis_remediation_blocked | default([]) }}'
   tags:
   - always
 - name: Fail remediation run when in-scope controls remain unresolved
@@ -497,5 +474,21 @@
   when:
   - cis_operation == 'remediate'
   - cis_fail_remediation_when_unresolved | bool
+  - not (cis_continue_on_remediation_error | default(true) | bool)
+  tags:
+  - always
+- name: Summarize remediation findings without stopping the run
+  ansible.builtin.debug:
+    msg:
+      failed_controls: '{{ cis_remediation_errors | default([]) | map(attribute=''control_id'') | unique | list
+        }}'
+      blocked_controls: '{{ cis_remediation_blocked | default([]) }}'
+      unresolved_controls: '{{ cis_unresolved_post_results | default([]) | map(attribute=''control_id'') | list
+        }}'
+      note: Execution continued as configured. Failed, blocked, or unresolved controls are not compliant; review
+        CSV and evidence JSON.
+  when:
+  - cis_operation == 'remediate'
+  - cis_continue_on_remediation_error | default(true) | bool
   tags:
   - always
