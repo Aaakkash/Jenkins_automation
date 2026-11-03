@@ -236,8 +236,8 @@
                     '1.1.2.1.4': ['/etc/fstab'],
                     '1.3.1.2': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
                     '1.4.1': ['/boot/grub2/user.cfg'],
-                    '5.1.8': ['/etc/ssh/sshd_config', '/etc/issue.net'],
-                    '7.2.3': ['/etc/group', '/etc/gshadow', '/etc/group-', '/etc/gshadow-'],
+                            '5.1.8': ['/etc/ssh/sshd_config', '/etc/issue.net'],
+                            '7.2.3': ['/etc/group', '/etc/gshadow', '/etc/group-', '/etc/gshadow-'],
                     '1.4.2': ['/boot/efi/EFI/**/grub*', '/boot/grub2/grub*', '/boot/grub2/user.cfg'],
                     '1.7.3': ['/etc/issue.net'],
                     '2.4.1.7': ['/etc/cron.d'],
@@ -392,6 +392,7 @@
     register: cis_prechange_backup_plan
     changed_when: false
     check_mode: false
+    no_log: true
   - name: Prepare private pre-change file snapshots
     become: true
     ansible.builtin.command:
@@ -471,6 +472,7 @@
     when: not ansible_check_mode
     tags:
     - cis_backup_prepare
+    no_log: true
   - name: Save prepared backup transaction
     ansible.builtin.set_fact:
       cis_backup_transaction: '{{ cis_backup_prepare_result.stdout | from_json }}'
@@ -2784,6 +2786,15 @@
       - not ansible_check_mode
       - cis_sshd_root_main_change.changed or (cis_sshd_root_include_changes.results | selectattr('changed', 'equalto',
         true) | list | length > 0)
+  - name: Read current crypto policy for an isolated subpolicy control
+    ansible.builtin.command:
+      argv:
+      - update-crypto-policies
+      - --show
+    register: cis_crypto_policy_before
+    changed_when: false
+    check_mode: false
+    when: cis_remediation_control_id in ['1.6.3','1.6.4','1.6.5','1.6.6','1.6.7']
   - name: Apply collection remediation for proven failures only
     ansible.builtin.include_role:
       name: trippsc2.cis.rhel9
@@ -2834,20 +2845,17 @@
           | default('/etc/ssl/ca/trusted.pem', true)
         }}
       rhel9cis_logrotate_frequency: '{{ cis_rsyslog_rotation_frequency }}'
-      _rhel9cis_expected_crypto_policy: |-
-        {{ rhel9cis_crypto_policy }}{{ ':NO-SHA1'
-             if '1.6.3' in cis_remediation_ids else ''
-        }}{{ ':NO-WEAKMAC'
-             if '1.6.4' in cis_remediation_ids else ''
-        }}{{ ':NO-SSHCBC'
-             if '1.6.5' in cis_remediation_ids else ''
-        }}{{ ':NO-SSHCHACHA20'
-             if '1.6.6' in cis_remediation_ids else ''
-        }}{{ ':NO-SSHETM'
-             if '1.6.7' in cis_remediation_ids else ''
-        }}{% for cis_crypto_subpolicy in
-                  rhel9cis_additional_crypto_subpolicies | default([])
-        %}:{{ cis_crypto_subpolicy }}{% endfor %}
+      _rhel9cis_expected_crypto_policy: '{{ cis_crypto_policy_before.stdout | default(rhel9cis_crypto_policy, true)
+        | trim }}{{ '':NO-SHA1'' if ''1.6.3'' in cis_collection_remediation_ids and ''NO-SHA1'' not in (cis_crypto_policy_before.stdout
+        | default('''', true)).split('':'') else '''' }}{{ '':NO-WEAKMAC'' if ''1.6.4'' in cis_collection_remediation_ids
+        and ''NO-WEAKMAC'' not in (cis_crypto_policy_before.stdout | default('''', true)).split('':'') else ''''
+        }}{{ '':NO-SSHCBC'' if ''1.6.5'' in cis_collection_remediation_ids and ''NO-SSHCBC'' not in (cis_crypto_policy_before.stdout
+        | default('''', true)).split('':'') else '''' }}{{ '':NO-SSHCHACHA20'' if ''1.6.6'' in cis_collection_remediation_ids
+        and ''NO-SSHCHACHA20'' not in (cis_crypto_policy_before.stdout | default('''', true)).split('':'') else
+        '''' }}{{ '':NO-SSHETM'' if ''1.6.7'' in cis_collection_remediation_ids and ''NO-SSHETM'' not in (cis_crypto_policy_before.stdout
+        | default('''', true)).split('':'') else '''' }}{% for subpolicy in rhel9cis_additional_crypto_subpolicies
+        | default([]) %}{% if subpolicy not in (cis_crypto_policy_before.stdout | default('''', true)).split('':'')
+        %}:{{ subpolicy }}{% endif %}{% endfor %}'
     when: cis_collection_remediation_ids | length > 0
   - name: Apply pending CIS collection handlers before post-validation
     ansible.builtin.meta: flush_handlers
@@ -3086,31 +3094,22 @@
           'control_id': cis_remediation_control_id,
           'task': ansible_failed_task.name | default('Unknown task'),
           'message': (
-            'REDACTED: Ansible no_log task'
+            (ansible_failed_result.stderr | default(ansible_failed_result.msg | default('Backup step failed'), true))[:1600]
+                    if ('cis_backup_prepare' in (ansible_failed_task.tags | default([])) or 'cis_changed_file_backups' in (ansible_failed_task.tags | default([])))
+                    else 'REDACTED: Ansible no_log task'
             if (ansible_failed_result._ansible_no_log | default(false) | bool)
                or (ansible_failed_task.no_log | default(false) | bool)
             else ansible_failed_result.msg | default('Task failed')
           ),
           'rc': ansible_failed_result.rc | default('not returned')
         }] }}
-  - name: Emit failed remediation evidence before stopping
-    ansible.builtin.debug:
-      msg:
-        cis_report_payload:
-          stage: final
-          operation: '{{ cis_operation }}'
-          host: '{{ inventory_hostname }}'
-          results: '{{ cis_pre_validation_results | default([]) }}'
-          post_results: []
-          remediation_attempted: '{{ cis_remediation_ids | default([]) }}'
-          remediation_errors: '{{ cis_remediation_errors | default([]) }}'
-          connection_address: '{{ ansible_host | default('''') }}'
-          default_ipv4: '{{ ansible_facts.default_ipv4.address | default('''') }}'
-          hostname: '{{ ansible_facts.hostname | default(inventory_hostname) }}'
-          msb_status: '{{ cis_msb_status | default(''NOT_RUN'') }}'
-          msb_output: '{{ cis_msb_output | default('''') }}'
-          msb_backup_details: '{{ cis_msb_backup_details | default('''') }}'
   - name: Stop remediation on failure
     ansible.builtin.fail:
       msg: Remediation failed. Review the failed task and recorded evidence before further changes. No automatic
         rollback was attempted.
+    when: not (cis_continue_on_remediation_error | default(true) | bool)
+  - name: Continue with the next selected remediation
+    ansible.builtin.debug:
+      msg: Control {{ cis_remediation_control_id }} failed. Error/recovery evidence retained; continuing without
+        automatic rollback.
+    when: cis_continue_on_remediation_error | default(true) | bool
