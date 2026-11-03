@@ -494,6 +494,9 @@ class CallbackModule(CallbackBase):
                         "msb_output": payload.get("msb_output", ""),
                         "msb_backup_details": payload.get("msb_backup_details", ""),
                         "operation": payload.get("operation", "validate"),
+                        "blocked_reason": next((entry.get("reason", "Prerequisite unavailable")
+                            for entry in payload.get("remediation_blocked", [])
+                            if str(entry.get("control_id")) == key[1]), ""),
                         "pre": pre,
                         "post": post_by_id.get(pre.get("control_id")),
                         "attempted": attempted,
@@ -537,6 +540,8 @@ class CallbackModule(CallbackBase):
                 final_status = pre_status
             elif pre_status == "COMPLIANT":
                 final_status = "COMPLIANT"
+            elif state.get("blocked_reason"):
+                final_status = "REMEDIATION_BLOCKED"
             elif (
                 control_id in state["skipped_by_policy"]
                 and control_id not in attempted
@@ -564,6 +569,9 @@ class CallbackModule(CallbackBase):
                 control_id in attempted, control_id in state['skipped_by_policy'],
                 events, state['errors'], checkpoint=pre.get('checkpoint', ''),
             )
+
+            if operation == "remediate" and state.get("blocked_reason"):
+                remediation_summary = "Remediation skipped - " + state["blocked_reason"]
 
             rows.append(
                 {
@@ -669,7 +677,7 @@ class CallbackModule(CallbackBase):
             evidence_target = target.with_suffix(".evidence.json")
             full_rows = sorted(host_rows, key=control_key)
             with evidence_target.open("w", encoding="utf-8") as stream:
-                json.dump({"schema_version": "2.3.2", "host": host, "rows": full_rows},
+                json.dump({"schema_version": "2.3.3", "host": host, "rows": full_rows},
                           stream, ensure_ascii=False, indent=2)
             os.chmod(evidence_target, 0o600)
             with target.open("w", newline="", encoding="utf-8-sig") as stream:
