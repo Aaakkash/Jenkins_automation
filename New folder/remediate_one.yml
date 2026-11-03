@@ -1,0 +1,65 @@
+- name: Set current remediation context
+  ansible.builtin.set_fact:
+    cis_active_remediation_control_id: '{{ cis_dispatch_control_id }}'
+    cis_control_block_reason: ''
+- name: Isolate one remediation control
+  block:
+  - name: Check active authselect profile before profile-dependent controls
+    become: true
+    ansible.builtin.command:
+      argv:
+      - authselect
+      - current
+      - --raw
+    register: cis_authselect_preflight
+    changed_when: false
+    failed_when: false
+    check_mode: false
+    when: cis_dispatch_control_id in cis_authselect_required_control_ids
+  - name: Record missing authselect prerequisite without changing PAM
+    ansible.builtin.set_fact:
+      cis_control_block_reason: '{{ ''Active authselect profile unavailable (rc='' ~ (cis_authselect_preflight.rc
+        | default(''unknown'') | string) ~ ''). Existing legacy PAM configuration was not changed. Unix team must
+        establish the approved authentication profile.'' }}'
+    when:
+    - cis_dispatch_control_id in cis_authselect_required_control_ids
+    - cis_authselect_preflight.rc | default(-1) != 0 or cis_authselect_preflight.stdout | default('') | trim | length
+      == 0
+  - name: Record blocked remediation control
+    ansible.builtin.set_fact:
+      cis_remediation_blocked: '{{ cis_remediation_blocked | default([]) + [{''control_id'': cis_dispatch_control_id,
+        ''reason'': cis_control_block_reason}] }}'
+    when: cis_control_block_reason | length > 0
+  - name: Display why this control is skipped
+    ansible.builtin.debug:
+      msg: '{{ cis_dispatch_control_id }}: {{ cis_control_block_reason }}'
+    when: cis_control_block_reason | length > 0
+  - name: Attempt the control only after its prerequisites pass
+    when: cis_control_block_reason | length == 0
+    block:
+    - name: Record the attempted control
+      ansible.builtin.set_fact:
+        cis_remediation_attempted_ids: '{{ cis_remediation_attempted_ids | default([]) + [cis_dispatch_control_id]
+          }}'
+    - name: Run the control with its own backup transaction
+      ansible.builtin.include_tasks: remediate_report_gaps.yml
+      vars:
+        cis_remediation_control_id: '{{ cis_dispatch_control_id }}'
+        cis_custom_remediation_ids: '{{ [cis_dispatch_control_id] if cis_dispatch_control_id in cis_custom_supported_ids
+          else [] }}'
+        cis_collection_remediation_ids: '{{ [] if cis_dispatch_control_id in cis_custom_supported_ids else [cis_dispatch_control_id]
+          }}'
+  rescue:
+  - name: Record unexpected control-wrapper failure
+    ansible.builtin.set_fact:
+      cis_remediation_errors: '{{ cis_remediation_errors | default([]) + [{''control_id'': cis_dispatch_control_id,
+        ''task'': ansible_failed_task.name | default(''Control dispatch''), ''message'': ''REDACTED: Ansible no_log
+        task'' if ansible_failed_result._ansible_no_log | default(false) | bool else ansible_failed_result.msg |
+        default(''Control task failed''), ''rc'': ansible_failed_result.rc | default(''not returned'')}] }}'
+  - name: Continue with the next control after dispatch failure
+    ansible.builtin.debug:
+      msg: '{{ cis_dispatch_control_id }} failed; recorded in the report. Proceeding to the next selected control.'
+  - name: Stop only when fail-fast mode is explicitly requested
+    ansible.builtin.fail:
+      msg: Control failed and cis_continue_on_remediation_error is false.
+    when: not (cis_continue_on_remediation_error | default(true) | bool)
