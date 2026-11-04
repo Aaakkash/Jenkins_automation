@@ -2162,7 +2162,7 @@ cis_validators:
       for file in /etc/security/pwquality.conf.d/*.conf; do
         [ ! -f "$file" ] || files+=("$file")
       done
-      [ "${#files[@]}" -gt 0 ] || { echo 'NON_COMPLIANT: no password quality configuration'; exit 1; }
+      [ -n "${files[*]}" ] || { echo 'NON_COMPLIANT: no password quality configuration'; exit 1; }
       awk -v required="$required" '
         /^[ \t]*[mM][iI][nN][lL][eE][nN][ \t]*=/ {
           value=$0; sub(/^[^=]*=/,"",value); sub(/[;#].*$/,"",value)
