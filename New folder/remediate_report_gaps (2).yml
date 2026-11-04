@@ -255,7 +255,7 @@
                     '1.1.2.1.4': ['/etc/fstab'],
                     '1.3.1.2': ['/boot/efi/EFI/*/grubenv', '/boot/grub2/grubenv', '/boot/loader/entries/*.conf', '/etc/default/grub'],
                     '1.4.1': ['/boot/grub2/user.cfg'],
-                            '5.1.8': ['/etc/ssh/sshd_config', '/etc/issue.net'],
+                            '5.1.8': ['/etc/ssh/sshd_config', '/etc/issue.net', '/etc/pam.d/sshd'],
                             '7.2.3': ['/etc/group', '/etc/gshadow', '/etc/group-', '/etc/gshadow-'],
                     '1.4.2': ['/boot/efi/EFI/**/grub*', '/boot/grub2/grub*', '/boot/grub2/user.cfg'],
                     '1.7.3': ['/etc/issue.net'],
@@ -2599,7 +2599,9 @@
         mode: '0644'
         backup: false
   - name: 5.1.8 | Configure SSH banner across the active configuration tree
-    when: '''5.1.8'' in cis_custom_remediation_ids'
+    when:
+    - "'5.1.8' in cis_custom_remediation_ids"
+    - not (cis_duplicate_banner_cleanup_only | default(false) | bool)
     become: true
     block:
     - name: 5.1.8 | Require approved banner content
@@ -2826,6 +2828,14 @@
     when:
     - "'5.2.2' in cis_collection_remediation_ids"
     - cis_scom_permissions_before.stat.exists | default(false)
+  - name: 5.1.8 | Disable duplicate static PAM MOTD after verifying identical warning content
+    become: true
+    ansible.builtin.replace:
+      path: /etc/pam.d/sshd
+      regexp: '^(\s*session[ \t]+optional[ \t]+pam_motd\.so[ \t]*)$'
+      replace: '# CIS duplicate SSH MOTD disabled: \1'
+      backup: false
+    when: cis_duplicate_banner_cleanup_only | default(false) | bool
   - name: Apply collection remediation for proven failures only
     ansible.builtin.include_role:
       name: trippsc2.cis.rhel9
