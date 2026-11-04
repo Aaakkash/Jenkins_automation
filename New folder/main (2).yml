@@ -334,7 +334,7 @@
 - name: Run remediation workflow
   when:
   - cis_operation == 'remediate'
-  - cis_remediation_ids | length > 0
+  - cis_remediation_ids | length > 0 or ('5.1.8' in cis_selected_control_ids and '5.1.8' not in (cis_remediation_skip_ids | default([])))
   tags:
   - always
   module_defaults:
@@ -376,6 +376,12 @@
       - cis_remediation_ids | difference(cis_custom_supported_ids) | length > 0
 
 
+  - name: Check duplicate SSH banner display even when banner control is compliant
+    ansible.builtin.include_tasks: ssh_duplicate_banner.yml
+    when:
+    - "'5.1.8' in cis_selected_control_ids"
+    - "'5.1.8' not in (cis_remediation_skip_ids | default([]))"
+    - not ansible_check_mode
   - name: Emit remediation-attempt report payload
     ansible.builtin.debug:
       msg:
