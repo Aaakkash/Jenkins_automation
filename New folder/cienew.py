@@ -39,16 +39,21 @@ class CallbackModule(CallbackBase):
 
 
     @staticmethod
-    def _csv_cell(value, evidence_filename):
-        """One physical CSV row per control; preserve full fields in JSON."""
+    def _csv_cell(value):
+        """Keep each control on one physical CSV row."""
         text = "" if value is None else str(value)
         text = re.sub(r"[\r\n\x85\u2028\u2029]+", " | ", text)
         text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
-        # Excel counts UTF-16 code units, not Python code points.
+
         if len(text.encode("utf-16-le")) // 2 > 30000:
-            suffix = " [Full value: " + evidence_filename + "]"
-            budget = max(0, 30000 - len(suffix.encode("utf-16-le")) // 2)
-            text = text.encode("utf-16-le")[:budget * 2].decode("utf-16-le", errors="ignore") + suffix
+            suffix = " [TRUNCATED]"
+            budget = 30000 - len(suffix)
+            text = (
+                text.encode("utf-16-le")[:budget * 2]
+                .decode("utf-16-le", errors="ignore")
+                + suffix
+            )
+
         return text
 
     @staticmethod
@@ -610,8 +615,7 @@ class CallbackModule(CallbackBase):
                         + self._brief(error.get('message', 'Task failed'))
                         + (' | rc=' + str(error['rc']) if error.get('rc') is not None else '')
                         for error in state['errors'])),
-                    "evidence": (
-                        post.get("evidence", "") if post else pre.get("evidence", "")
+                    
                     ),
                 }
             )
@@ -637,7 +641,6 @@ class CallbackModule(CallbackBase):
             "remediation_output",
             "backup_details",
             "remediation_error",
-            "evidence",
         ]
 
         def control_key(row):
