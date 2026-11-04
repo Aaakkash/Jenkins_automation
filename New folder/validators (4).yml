@@ -2154,9 +2154,43 @@ cis_validators:
   '5.3.3.2.2':
     type: automatic
     command: |
-      value="$(find /etc/security -maxdepth 2 -type f \( -name pwquality.conf -o -path '*/pwquality.conf.d/*.conf' \) -exec awk -F= '/^[[:space:]]*minlen[[:space:]]*=/ {v=$2; sub(/[[:space:]]*[#;].*/,"",v); gsub(/[[:space:]]/,"",v); print v}' {} + 2>/dev/null | tail -1)"
-      echo "minlen=${value:-unset}"
-      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$CIS_PASSWORD_MIN_LENGTH" ]
+      required="${CIS_PASSWORD_MIN_LENGTH:-14}"
+      [[ "$required" =~ ^[0-9]+$ ]] || { echo 'ERROR: invalid configured password length'; exit 2; }
+      [ "$required" -ge 14 ] || required=14
+      files=()
+      [ ! -f /etc/security/pwquality.conf ] || files+=(/etc/security/pwquality.conf)
+      for file in /etc/security/pwquality.conf.d/*.conf; do
+        [ ! -f "$file" ] || files+=("$file")
+      done
+      [ "${#files[@]}" -gt 0 ] || { echo 'NON_COMPLIANT: no password quality configuration'; exit 1; }
+      awk -v required="$required" '
+        /^[ \t]*[mM][iI][nN][lL][eE][nN][ \t]*=/ {
+          value=$0; sub(/^[^=]*=/,"",value); sub(/[;#].*$/,"",value)
+          gsub(/^[ \t]+|[ \t]+$/,"",value)
+          print FILENAME ":" FNR ": minlen=" value " required>=" required
+          found++
+          if (value !~ /^[0-9]+$/ || value+0 < required) bad=1
+        }
+        END {
+          if (!found) print "NON_COMPLIANT: no active minlen configured"
+          exit (!found || bad) ? 1 : 0
+        }
+      ' "${files[@]}" || exit $?
+      # Reject weak inline PAM overrides when present; do not rewrite PAM here.
+      for file in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+        [ -f "$file" ] || { echo "ERROR: missing PAM file $file"; exit 2; }
+        awk -v required="$required" '
+          /^[ \t]*password[ \t]+/ && /pam_pwquality[.]so([ \t]|$)/ {
+            sub(/#.*/, "")
+            for (i=1;i<=NF;i++) if ($i ~ /^minlen=/) {
+              value=$i; sub(/^minlen=/,"",value)
+              print FILENAME ":" FNR ": inline minlen=" value
+              if (value !~ /^[0-9]+$/ || value+0 < required) bad=1
+            }
+          }
+          END { exit bad ? 1 : 0 }
+        ' "$file" || exit $?
+      done
   '5.3.3.2.3':
     type: automatic
     command: |
@@ -3368,5 +3402,4 @@ cis_validators:
 
       sys.exit(1 if failed else 0)
       PYSEQUENCE
-
 
