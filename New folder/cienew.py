@@ -615,8 +615,6 @@ class CallbackModule(CallbackBase):
                         + self._brief(error.get('message', 'Task failed'))
                         + (' | rc=' + str(error['rc']) if error.get('rc') is not None else '')
                         for error in state['errors'])),
-                    
-                    ),
                 }
             )
 
@@ -677,15 +675,10 @@ class CallbackModule(CallbackBase):
             while str(target.resolve()) in used_targets:
                 target = target.with_name(target.stem + "_duplicate" + target.suffix)
             used_targets.add(str(target.resolve()))
-            evidence_target = target.with_suffix(".evidence.json")
             full_rows = sorted(host_rows, key=control_key)
-            with evidence_target.open("w", encoding="utf-8") as stream:
-                json.dump({"schema_version": "2.3.3", "host": host, "rows": full_rows},
-                          stream, ensure_ascii=False, indent=2)
-            os.chmod(evidence_target, 0o600)
             with target.open("w", newline="", encoding="utf-8-sig") as stream:
                 writer = csv.DictWriter(stream, fieldnames=fields, quoting=csv.QUOTE_ALL, lineterminator="\n")
                 writer.writeheader()
-                writer.writerows({key: self._csv_cell(row.get(key, ""), evidence_target.name)
+                writer.writerows({key: self._csv_cell(row.get(key, ""))
                                   for key in fields} for row in full_rows)
             self._display.display(f"RHEL 9 CIS CSV report: {target}", color="green")
