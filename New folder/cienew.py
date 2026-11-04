@@ -115,6 +115,33 @@ class CallbackModule(CallbackBase):
             return [dict(original_file=original or 'Not returned by module',
                          changed_file=changed or 'Not returned by module',
                          backup_file=backup, change_type='modified')]
+        # Only a successful existing-file mode change with explicit before/after
+        # evidence qualifies. Missing diffs, touch, recursion and other metadata
+        # changes retain the unverified-backup warning.
+        if (action == 'file' and not item.get('failed')
+                and args.get('state') == 'file' and item.get('state') == 'file'
+                and not args.get('recurse') and isinstance(original, str)):
+            diffs = item.get('diff') or []
+            if isinstance(diffs, dict):
+                diffs = [diffs]
+            mode_changed = False
+            permission_only = bool(diffs)
+            for entry in diffs:
+                if not isinstance(entry, dict):
+                    permission_only = False
+                    break
+                before, after = entry.get('before'), entry.get('after')
+                if not isinstance(before, dict) or not isinstance(after, dict):
+                    permission_only = False
+                    break
+                if any(before.get(key) != after.get(key)
+                       for key in set(before) | set(after) if key != 'mode'):
+                    permission_only = False
+                if 'mode' in before and 'mode' in after and before['mode'] != after['mode']:
+                    mode_changed = True
+            if permission_only and mode_changed:
+                return [dict(original_file=original, changed_file=changed or original,
+                             backup_file=None, change_type='permissions_only')]
         if (action in {'copy', 'template', 'lineinfile', 'blockinfile', 'replace', 'file', 'cron'}
                 and isinstance(original, str) and original.startswith('/')
                 and item.get('state') != 'directory'):
@@ -142,11 +169,17 @@ class CallbackModule(CallbackBase):
                     resolved.update([record.get('original_file'), record.get('changed_file')])
                     resolved.update(record.get('original_aliases', []))
 
+        # Any content-capable or unknown change to the same path prevents a
+        # mode-only exemption from masking its missing backup.
+        uncertain = {r.get('original_file') for r in all_records
+                     if r.get('change_type') == 'backup_not_reported'}
         selected = {}
         priority = {'BACKUP_NOT_VERIFIED': 0, 'NEW_FILE_NO_ORIGINAL': 1,
                     'BACKUP_REUSED': 2, 'BACKUP_CREATED': 3}
         for record in all_records:
             original = record.get('original_file', 'Not returned by module')
+            if record.get('change_type') == 'permissions_only' and (original in resolved or original in uncertain):
+                continue
             if record.get('change_type') == 'backup_not_reported' and original in resolved:
                 continue
             backup = record.get('backup_file')
@@ -154,6 +187,8 @@ class CallbackModule(CallbackBase):
                 status = record.get('backup_status') or 'BACKUP_CREATED'
             elif record.get('change_type') == 'created':
                 status = 'NEW_FILE_NO_ORIGINAL'
+            elif record.get('change_type') == 'permissions_only':
+                status = 'PERMISSIONS_ONLY'
             else:
                 status = 'BACKUP_NOT_VERIFIED'
             key = (original, backup)
@@ -166,6 +201,8 @@ class CallbackModule(CallbackBase):
             backup = record.get('backup_file')
             if status == 'NEW_FILE_NO_ORIGINAL':
                 backup = 'Not required - file newly created'
+            elif status == 'PERMISSIONS_ONLY':
+                backup = 'Not required - permissions only'
             elif not backup:
                 backup = 'Not available - no verified backup reported'
             pairs.append(f'File: {original}\nBackup: {backup}')
