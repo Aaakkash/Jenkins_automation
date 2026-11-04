@@ -165,7 +165,7 @@
                     '5.3.3.1.2': ['/etc/security/faillock.conf'],
                     '5.3.3.1.3': ['/etc/security/faillock.conf'],
                     '5.3.3.2.1': ['/etc/security/pwquality.conf'],
-                    '5.3.3.2.2': ['/etc/security/pwquality.conf'],
+                    '5.3.3.2.2': ['/etc/security/pwquality.conf', '/etc/security/pwquality.conf.d/*.conf'],
                     '5.3.3.2.3': ['/etc/security/pwquality.conf'],
                     '5.3.3.2.4': ['/etc/security/pwquality.conf'],
                     '5.3.3.2.5': ['/etc/security/pwquality.conf'],
@@ -2916,6 +2916,41 @@
     when:
     - "'5.2.2' in cis_collection_remediation_ids"
     - not ansible_check_mode
+  - name: 5.3.3.2.2 | Normalize password length after collection remediation
+    when: "'5.3.3.2.2' in cis_collection_remediation_ids"
+    become: true
+    block:
+    - name: 5.3.3.2.2 | Require an approved CIS-compliant password length
+      ansible.builtin.assert:
+        that:
+        - (cis_password_min_length | string) is match('^[0-9]+$')
+        - cis_password_min_length | int >= 14
+        fail_msg: cis_password_min_length must be an integer of at least 14.
+    - name: 5.3.3.2.2 | Find existing password quality fragments
+      ansible.builtin.find:
+        paths: /etc/security/pwquality.conf.d
+        patterns: '*.conf'
+        file_type: file
+        recurse: false
+      register: cis_minlen_fragments
+    - name: 5.3.3.2.2 | Remove fragment minlen overrides in favor of the approved main-file value
+      ansible.builtin.replace:
+        path: '{{ item.path }}'
+        regexp: '(?im)^[ \t]*minlen[ \t]*=[^\r\n]*(?:\r?\n|$)'
+        replace: ''
+        backup: false
+      loop: '{{ cis_minlen_fragments.files }}'
+      loop_control:
+        label: '{{ item.path }}'
+    - name: 5.3.3.2.2 | Read the existing main password quality configuration
+      ansible.builtin.slurp:
+        src: /etc/security/pwquality.conf
+      register: cis_minlen_main
+    - name: 5.3.3.2.2 | Retain one approved active minlen entry
+      ansible.builtin.copy:
+        dest: /etc/security/pwquality.conf
+        content: '{{ ((cis_minlen_main.content | b64decode | regex_replace("(?im)^[ \t]*minlen[ \t]*=[^\r\n]*(?:\r?\n|$)", "")) | regex_replace("[\r\n]+$", "")) ~ "\nminlen = " ~ (cis_password_min_length | string) ~ "\n" }}'
+        backup: false
   - name: Apply pending CIS collection handlers before post-validation
     ansible.builtin.meta: flush_handlers
   - name: Retain only changed-file backups and remove unchanged snapshots
