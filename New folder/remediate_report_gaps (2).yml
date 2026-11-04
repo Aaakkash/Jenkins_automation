@@ -155,7 +155,7 @@
                     '5.1.7': ['/etc/ssh/sshd_config'],
                     '5.1.8': ['/etc/ssh/sshd_config'],
                     '5.1.9': ['/etc/ssh/sshd_config'],
-                    '5.2.2': ['/etc/sudoers'],
+                    '5.2.2': ['/etc/sudoers', '/etc/sudoers.d/scom'],
                     '5.2.3': ['/etc/sudoers'],
                     '5.2.4': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
                     '5.2.5': ['/etc/sudoers', '/etc/sudoers.d/**/*'],
@@ -2803,6 +2803,29 @@
       - not ansible_check_mode
       - cis_sshd_root_main_change.changed or (cis_sshd_root_include_changes.results | selectattr('changed', 'equalto',
         true) | list | length > 0)
+  - name: 5.2.2 | Inspect the SCOM file that can block sudo validation
+    become: true
+    ansible.builtin.stat:
+      path: /etc/sudoers.d/scom
+      follow: false
+      get_checksum: false
+      get_mime: false
+    register: cis_scom_permissions_before
+    when: "'5.2.2' in cis_collection_remediation_ids"
+  - name: 5.2.2 | Require a regular SCOM file when present
+    ansible.builtin.assert:
+      that:
+      - not cis_scom_permissions_before.stat.exists or cis_scom_permissions_before.stat.isreg | default(false)
+      fail_msg: SCOM sudoers entry is not a regular file; review it before changing permissions.
+    when: "'5.2.2' in cis_collection_remediation_ids"
+  - name: 5.2.2 | Correct existing SCOM permissions using the shared backup transaction
+    become: true
+    ansible.builtin.file:
+      path: /etc/sudoers.d/scom
+      mode: '0440'
+    when:
+    - "'5.2.2' in cis_collection_remediation_ids"
+    - cis_scom_permissions_before.stat.exists | default(false)
   - name: Apply collection remediation for proven failures only
     ansible.builtin.include_role:
       name: trippsc2.cis.rhel9
@@ -2868,6 +2891,21 @@
                   rhel9cis_additional_crypto_subpolicies | default([])
         %}:{{ cis_crypto_subpolicy }}{% endfor %}
     when: cis_collection_remediation_ids | length > 0
+  - name: 2.3.1 | Enable chronyd at boot and ensure it is running
+    become: true
+    ansible.builtin.systemd_service:
+      name: chronyd.service
+      enabled: true
+      state: started
+    when: "'2.3.1' in cis_collection_remediation_ids"
+  - name: 5.2.2 | Verify the complete sudoers configuration after remediation
+    become: true
+    ansible.builtin.command:
+      argv: [/usr/sbin/visudo, -c]
+    changed_when: false
+    when:
+    - "'5.2.2' in cis_collection_remediation_ids"
+    - not ansible_check_mode
   - name: Apply pending CIS collection handlers before post-validation
     ansible.builtin.meta: flush_handlers
   - name: Retain only changed-file backups and remove unchanged snapshots
