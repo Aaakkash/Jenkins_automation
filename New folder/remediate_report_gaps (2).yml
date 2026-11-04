@@ -2942,14 +2942,24 @@
       loop: '{{ cis_minlen_fragments.files }}'
       loop_control:
         label: '{{ item.path }}'
-    - name: 5.3.3.2.2 | Read the existing main password quality configuration
-      ansible.builtin.slurp:
-        src: /etc/security/pwquality.conf
-      register: cis_minlen_main
-    - name: 5.3.3.2.2 | Retain one approved active minlen entry
-      ansible.builtin.copy:
-        dest: /etc/security/pwquality.conf
-        content: '{{ ((cis_minlen_main.content | b64decode | regex_replace("(?im)^[ \t]*minlen[ \t]*=[^\r\n]*(?:\r?\n|$)", "")) | regex_replace("[\r\n]+$", "")) ~ "\nminlen = " ~ (cis_password_min_length | string) ~ "\n" }}'
+    - name: 5.3.3.2.2 | Repair literal newline corruption from the previous minlen patch
+      ansible.builtin.replace:
+        path: /etc/security/pwquality.conf
+        regexp: (?m)^([^\r\n]*?)\\n(minlen[ \t]*=[ \t]*[0-9]+)\\n$
+        replace: \1\n\2\n
+        backup: false
+    - name: 5.3.3.2.2 | Remove conflicting active main-file minlen entries
+      ansible.builtin.replace:
+        path: /etc/security/pwquality.conf
+        regexp: (?im)^[ \t]*minlen[ \t]*=[^\r\n]*(?:\r?\n|$)
+        replace: ''
+        backup: false
+    - name: 5.3.3.2.2 | Write the approved minlen as a separate configuration line
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: (?i)^[ \t]*minlen[ \t]*=
+        line: minlen = {{ cis_password_min_length }}
+        insertafter: EOF
         backup: false
   - name: Apply pending CIS collection handlers before post-validation
     ansible.builtin.meta: flush_handlers
