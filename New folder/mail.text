@@ -10,3 +10,21 @@ Thanks,
 Aakash
 
 Handover — RHEL 9 CIS Validation and Remediation Automation
+
+
+Hi Team,
+
+I am handing over the RHEL 9 CIS validation and remediation automation. The role and supporting files are being committed to the **htg_rhel_upgrade** repository under the **MSB compliance branch**. Please refer to the attached SOP for configuration, deployment, execution commands, reporting and backup verification.
+
+The updated code includes CSV-only reporting, changed-file backup tracking with original backup reuse, remediation fixes and duplicate SSH banner handling.
+
+Please review the code and test it on an approved RHEL 9 sandbox server before production deployment. Start with validation, review the findings and configuration inputs, then run the approved remediation scope.
+
+Please share the tested commit ID, server details, Ansible recap, generated CSV, backup verification and any unresolved findings. Where authentication changes apply, also confirm local and AD login and required service access.
+
+The remaining authentication configuration and account findings on server **10.196.130.91** require Unix-team review and approved decisions.
+
+Please confirm the sandbox test results and readiness for production rollout.
+
+Thanks,
+Aakash
