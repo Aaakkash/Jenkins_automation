@@ -1,0 +1,107 @@
+- name: Add one-time maintenance window starting now for six hours
+  ansible.windows.win_powershell:
+    script: |
+      param(
+          [string]$SiteCode,
+          [string]$ProviderServer,
+          [string]$ModulePath,
+          [string]$CollectionName
+      )
+
+      $ErrorActionPreference = 'Stop'
+      $Ansible.Changed = $false
+
+      Import-Module $ModulePath -ErrorAction Stop
+
+      $drive = Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue
+      if (-not $drive) {
+          $drive = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderServer
+      }
+      if ($drive.Root -ine $ProviderServer) {
+          throw 'CMSite drive points to a different SMS Provider.'
+      }
+
+      Push-Location ($SiteCode + ':\')
+      try {
+          $collections = @(
+              Get-CMDeviceCollection -Name $CollectionName |
+                  Where-Object { $_.Name -eq $CollectionName }
+          )
+          if ($collections.Count -ne 1) {
+              throw "Expected exactly one collection named '$CollectionName'."
+          }
+
+          # UTC ensures the same actual window across client time zones.
+          $start = (Get-Date).ToUniversalTime()
+          $end = $start.AddHours(6)
+
+          $schedule = New-CMSchedule `
+              -Start $start `
+              -End $end `
+              -Nonrecurring `
+              -IsUtc
+
+          New-CMMaintenanceWindow `
+              -CollectionId $collections[0].CollectionID `
+              -Name ("Post-upgrade patching - " + $start.ToString('yyyyMMdd-HHmmss') + " UTC") `
+              -Schedule $schedule `
+              -ApplyTo SoftwareUpdatesOnly `
+              -IsEnabled $true `
+              -IsUtc $true `
+              -Confirm:$false | Out-Null
+
+          $Ansible.Changed = $true
+          $Ansible.Result = @{
+              collection_id = $collections[0].CollectionID
+              start_utc = $start.ToString('o')
+              end_utc = $end.ToString('o')
+          }
+      }
+      finally {
+          Pop-Location
+      }
+    parameters:
+      SiteCode: "{{ sccm_site_code }}"
+      ProviderServer: "{{ sccm_provider_server }}"
+      ModulePath: "{{ sccm_module_path }}"
+      CollectionName: "{{ sccm_collection_name }}"
+  delegate_to: "{{ sccm_management_host }}"
+  run_once: true
+  register: sccm_maintenance_window
+
+
+
+
+
+
+
+Add it in **`roles/sccm_post_upgrade_patching/tasks/main.yml`**, inside the existing `block:`, immediately after:
+
+```yaml
+- name: Resolve collection and verify named deployments before membership change
+```
+
+and before:
+
+```yaml
+- name: Add a direct rule only if neither effective membership nor a direct rule exists
+```
+
+The order should be:
+
+```yaml
+- name: Manage collection and patch target
+  block:
+    # 1. Existing task: resolve collection and verify deployments
+
+    # 2. Paste the maintenance-window task here
+
+    # 3. Existing task: add target to collection
+
+    # Remaining existing tasks...
+```
+
+Indent the pasted task to match the other tasks inside `block:`.
+
+**Remove `run_once: true` from that task.** Your example uses `serial: 1`, so `run_once` would still execute for every server batch. With the supplied snippet, each server therefore creates a new six-hour collection window; those windows apply to **every member of the collection**.
+
