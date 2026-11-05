@@ -1,0 +1,12 @@
+Hi Team,
+
+Please find the updated SOP attached for the RHEL 9 CIS validation and remediation automation. The code is available in the **htg_rhel_upgrade** repository under the **MSB compliance branch**.
+
+The required password will be shared through a separate email for integration.
+
+Please integrate the code, test it on a sandbox server, and confirm whether you encounter any issues while running it. You can reach out to me if you need any assistance.
+
+Thanks,
+Aakash
+
+Handover — RHEL 9 CIS Validation and Remediation Automation
